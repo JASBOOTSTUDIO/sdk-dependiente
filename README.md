@@ -133,6 +133,20 @@ Si las fuentes JMN no están en la ubicación por defecto, puedes definir **`JAS
 
 ## Cómo contribuir
 
+### Flujo con ramas (recomendado)
+
+No integres cambios directamente en **`main`** desde tu clon sin acuerdo del equipo. El flujo habitual es:
+
+1. Actualiza `main`: `git checkout main` y `git pull origin main`.
+2. Crea una rama descriptiva: `git checkout -b tipo/descripcion-corta` (ejemplos: `fix/vm-stdin`, `docs/readme-ejemplos`, `feat/listas-codegen`).
+3. Haz commits con mensajes claros en español.
+4. Sube la rama al remoto: `git push -u origin tipo/descripcion-corta`.
+5. En GitHub, abre un **pull request** desde tu rama hacia **`main`** en [JASBOOTSTUDIOS/sdk-dependiente](https://github.com/JASBOOTSTUDIOS/sdk-dependiente) y espera revisión o fusión.
+
+Así `main` permanece estable y cada cambio queda trazado en una rama y en el PR.
+
+### Dónde tocar el código
+
 1. **Compilador (sintaxis, tipos, codegen, mensajes de error):** `jas-compiler-c/src/` — tras cambios, ejecutar `scripts\build-compiler.bat` y probar con `.jasb` de ejemplo en `jas-compiler-c/tests/` o en tu propio archivo.
 2. **VM (opcodes, I/O, comportamiento en ejecución):** `jasboot-ir/src/` — principalmente `vm.c`, `reader_ir.c`, `ir_format.h`; reconstruir con `scripts\build-vm.bat` o `build-all.bat`.
 3. **JMN enlazado a la VM:** `jasboot-jmn-core/src/memoria_neuronal/` — cambios suelen exigir recompilar la VM.
@@ -171,7 +185,7 @@ Si ya compilaste antes de clonar reglas nuevas, puedes limpiar restos locales co
 
 ## Rama de trabajo
 
-Desarrollo coordinado en la rama **`main`**.
+La rama **`main`** es la línea base integrada en el remoto. El desarrollo día a día debe hacerse en **ramas de características o correcciones** y fusionarse en `main` vía pull request (ver *Flujo con ramas* arriba).
 
 ---
 
