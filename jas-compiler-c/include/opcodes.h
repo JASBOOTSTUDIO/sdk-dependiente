@@ -100,6 +100,25 @@
 #define OP_MEM_ELEGIR_POR_PESO_IDX     0x6F
 #define OP_MEM_ELEGIR_POR_PESO_ID      0x70
 #define OP_MEM_ELEGIR_POR_PESO_SEMILLA 0x71
+#define OP_JSON_A_TEXTO      0x72
+#define OP_JSON_A_ENTERO     0x73
+#define OP_JSON_A_FLOTANTE   0x74
+#define OP_JSON_A_BOOL       0x75
+#define OP_JSON_TIPO         0x76
+#define OP_CLOSURE_CREAR     0x77
+#define OP_CLOSURE_CARGAR    0x78
+#define OP_BYTES_CREAR       0x79
+#define OP_BYTES_TAMANO      0x7A
+#define OP_BYTES_OBTENER     0x7B
+#define OP_BYTES_PONER       0x7C
+#define OP_BYTES_ANEXAR      0x7D
+#define OP_BYTES_SUBBYTES    0x7F
+#define OP_BYTES_DESDE_TEXTO 0x80
+#define OP_BYTES_A_TEXTO     0x81
+#define OP_DNS_RESOLVER      0x82
+#define OP_TCP_CONECTAR      0x83
+#define OP_TCP_ESCUCHAR      0x84
+#define OP_TCP_ACEPTAR       0x85
 
 #define OP_BIT_SHR        0x5E
 
@@ -177,6 +196,19 @@
 #define OP_STR_MINUSCULAS      0x50
 #define OP_MEM_LISTA_LIMPIAR   0xB6
 #define OP_MEM_LISTA_LIBERAR   0x8D
+#define OP_TCP_ENVIAR          0x19
+#define OP_TCP_RECIBIR         0x1A
+#define OP_TCP_CERRAR          0x1B
+#define OP_TLS_CLIENTE         0x1C
+#define OP_TLS_SERVIDOR        0x1D
+#define OP_TLS_ENVIAR          0x1E
+#define OP_TLS_RECIBIR         0x1F
+#define OP_TLS_CERRAR          0x25
+#define OP_JSON_PARSE         0x88
+#define OP_JSON_STRINGIFY     0x89
+#define OP_JSON_OBJETO_OBTENER 0x8A
+#define OP_JSON_LISTA_OBTENER  0x8B
+#define OP_JSON_LISTA_TAMANO   0x8C
 #define OP_TRY_ENTER           0x86
 #define OP_TRY_LEAVE           0x87
 #define OP_MEM_LISTA_ID        0xB4

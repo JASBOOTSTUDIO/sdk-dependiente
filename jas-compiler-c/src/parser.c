@@ -239,7 +239,10 @@ static int is_decl_type_token(const Token *t) {
             strcmp(s, "byte") == 0 || strcmp(s, "vec2") == 0 ||
             strcmp(s, "vec3") == 0 || strcmp(s, "vec4") == 0 ||
             strcmp(s, "mat4") == 0 || strcmp(s, "mat3") == 0 ||
-            strcmp(s, "funcion") == 0);
+            strcmp(s, "funcion") == 0 || strcmp(s, "bytes") == 0 ||
+            strcmp(s, "socket") == 0 || strcmp(s, "tls") == 0 ||
+            strcmp(s, "http_solicitud") == 0 || strcmp(s, "http_respuesta") == 0 ||
+            strcmp(s, "http_servidor") == 0);
 }
 
 /* Tras consumir el token `lista`: si sigue `<T>`, lo parsea (obligatorio cerrar bien). Si no hay `<`, devuelve NULL. */
@@ -255,12 +258,12 @@ static char *parse_optional_lista_element_type(Parser *p) {
                        "En `lista<T>` se esperaba un tipo T (entero, flotante, texto, bool) despues de '<'.");
         return NULL;
     }
-    static const char *ok[] = {"entero", "flotante", "texto", "bool", NULL};
+    static const char *ok[] = {"entero", "flotante", "texto", "bool", "byte", "bytes", NULL};
     int good = 0;
     for (int i = 0; ok[i]; i++)
         if (strcmp(inner->value.str, ok[i]) == 0) good = 1;
     if (!good) {
-        set_error_here(p, inner, "lista<T>: T debe ser entero, flotante, texto o bool.");
+        set_error_here(p, inner, "lista<T>: T debe ser entero, flotante, texto, bool, byte o bytes.");
         return NULL;
     }
     char *s = strdup(inner->value.str);
@@ -1577,7 +1580,9 @@ static ASTNode *parse_statement(Parser *p) {
             strcmp(t->value.str, "caracter") == 0 || strcmp(t->value.str, "u32") == 0 ||
             strcmp(t->value.str, "u64") == 0 || strcmp(t->value.str, "u8") == 0 ||
             strcmp(t->value.str, "byte") == 0 || strcmp(t->value.str, "vec2") == 0 ||
-            strcmp(t->value.str, "vec3") == 0 || strcmp(t->value.str, "vec4") == 0 || strcmp(t->value.str, "mat4") == 0 || strcmp(t->value.str, "mat3") == 0) {
+            strcmp(t->value.str, "vec3") == 0 || strcmp(t->value.str, "vec4") == 0 || strcmp(t->value.str, "mat4") == 0 || strcmp(t->value.str, "mat3") == 0 ||
+            strcmp(t->value.str, "bytes") == 0 || strcmp(t->value.str, "socket") == 0 || strcmp(t->value.str, "tls") == 0 ||
+            strcmp(t->value.str, "http_solicitud") == 0 || strcmp(t->value.str, "http_respuesta") == 0 || strcmp(t->value.str, "http_servidor") == 0) {
             char *ty = strdup(t->value.str);
             advance(p);
             const Token *nt = peek(p, 0);
@@ -2128,9 +2133,22 @@ static ASTNode *parse_statement(Parser *p) {
             ASTNode *e = NULL;
             const Token *nx_ret = peek(p, 0);
             if (nx_ret) {
-                int kw_starts_expr = nx_ret->type == TOK_KEYWORD && nx_ret->value.str &&
-                    (strcmp(nx_ret->value.str, "llamar") == 0 || strcmp(nx_ret->value.str, "no") == 0);
-                if (nx_ret->type != TOK_KEYWORD || kw_starts_expr)
+                /* Si el siguiente token no puede iniciar una expresion, es retorno void
+                 * (fin de linea / siguiente sentencia como imprimir, si, entero x = ...).
+                 * Muchas APIs incorporadas (mem_lista_*, vec2, etc.) se tokenizan como
+                 * TOK_KEYWORD; sin esto se descarta la expresion y se emite retornar vacio. */
+                int parse_ret_expr = 1;
+                if (nx_ret->type == TOK_KEYWORD && nx_ret->value.str) {
+                    const char *kw = nx_ret->value.str;
+                    size_t kw_len = strlen(kw);
+                    int kw_starts_expr = strcmp(kw, "llamar") == 0 || strcmp(kw, "no") == 0;
+                    int ctor_kw = strcmp(kw, "vec2") == 0 || strcmp(kw, "vec3") == 0 ||
+                                  strcmp(kw, "vec4") == 0 || strcmp(kw, "mat3") == 0 ||
+                                  strcmp(kw, "mat4") == 0;
+                    if (!kw_starts_expr && !ctor_kw && !is_sistema_llamada(kw, kw_len))
+                        parse_ret_expr = 0;
+                }
+                if (parse_ret_expr)
                     e = parse_expression(p);
             }
             ReturnNode *n = calloc(1, sizeof(ReturnNode));
@@ -2555,7 +2573,9 @@ static ASTNode *parse_function(Parser *p, int is_exported) {
          strcmp(rt->value.str, "mapa") == 0 || strcmp(rt->value.str, "u32") == 0 ||
          strcmp(rt->value.str, "u64") == 0 || strcmp(rt->value.str, "u8") == 0 ||
          strcmp(rt->value.str, "byte") == 0 || strcmp(rt->value.str, "vec2") == 0 ||
-         strcmp(rt->value.str, "vec3") == 0 || strcmp(rt->value.str, "vec4") == 0 || strcmp(rt->value.str, "mat4") == 0 || strcmp(rt->value.str, "mat3") == 0)) {
+         strcmp(rt->value.str, "vec3") == 0 || strcmp(rt->value.str, "vec4") == 0 || strcmp(rt->value.str, "mat4") == 0 || strcmp(rt->value.str, "mat3") == 0 ||
+         strcmp(rt->value.str, "bytes") == 0 || strcmp(rt->value.str, "socket") == 0 || strcmp(rt->value.str, "tls") == 0 ||
+         strcmp(rt->value.str, "http_solicitud") == 0 || strcmp(rt->value.str, "http_respuesta") == 0 || strcmp(rt->value.str, "http_servidor") == 0)) {
         free(ret_type);
         ret_type = strdup_safe(rt->value.str);
         advance(p);

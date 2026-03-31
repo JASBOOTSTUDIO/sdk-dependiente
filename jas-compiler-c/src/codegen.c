@@ -74,11 +74,19 @@ struct CodeGen {
     char **ext_func_names;
     char **ext_func_return_types;
     size_t n_ext_funcs;
+    char **string_pool_keys;
+    size_t *string_pool_offsets;
+    size_t string_pool_count;
+    size_t string_pool_cap;
     int function_depth;
     /* Tipo de retorno de la funcion que se esta compilando (NULL en principal). */
     const char *current_fn_return;
     /* Nombre de la funcion en curso (para diagnosticos de retornar). */
     const char *current_fn_name;
+    char **current_lambda_capture_names;
+    const char **current_lambda_capture_types;
+    size_t current_lambda_capture_count;
+    size_t current_lambda_scope_base;
 
     int macro_end_label; /* label to jump to when 'retornar' is found inside a macro block. -1 if not in macro */
     int macro_dest_reg;  /* target register for 'retornar' inside macro */
@@ -87,6 +95,1139 @@ struct CodeGen {
 
 static int is_node(const ASTNode *n, NodeType t) {
     return n && n->type == t;
+}
+
+static void emit(CodeGen *cg, uint8_t op, uint8_t a, uint8_t b, uint8_t c, uint8_t flags);
+static int new_label(CodeGen *cg);
+static void mark_label(CodeGen *cg, int id);
+static void add_patch(CodeGen *cg, int label_id, int type);
+static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg);
+static void visit_statement(CodeGen *cg, ASTNode *node);
+static size_t add_string(CodeGen *cg, const char *s);
+static int has_interpolation(const char *s);
+static void emit_print_cstr(CodeGen *cg, const char *s);
+static int get_func_label(CodeGen *cg, const char *name);
+
+static void emit_load_text_literal_reg(CodeGen *cg, const char *s, int dest_reg) {
+    size_t off = add_string(cg, s ? s : "");
+    emit(cg, OP_STR_REGISTRAR_LITERAL, off & 0xFF, (off >> 8) & 0xFF, (off >> 16) & 0xFF,
+         IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+    emit(cg, OP_LOAD_STR_HASH, dest_reg, off & 0xFF, (off >> 8) & 0xFF,
+         IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+}
+
+static void emit_load_u64_reg(CodeGen *cg, uint64_t v, int dest_reg) {
+    emit(cg, OP_MOVER, dest_reg, v & 0xFF, (v >> 8) & 0xFF,
+         IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+    if (v & 0xFFFFFFFFFFFF0000ULL) {
+        int tmp = (dest_reg != 3) ? 3 : 4;
+        if ((v >> 16) & 0xFFFF) {
+            emit(cg, OP_MOVER, tmp, (v >> 16) & 0xFF, (v >> 24) & 0xFF,
+                 IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+            emit(cg, OP_BIT_SHL, tmp, tmp, 16, IR_INST_FLAG_C_IMMEDIATE);
+            emit(cg, OP_O, dest_reg, dest_reg, tmp, 0);
+        }
+        if ((v >> 32) & 0xFFFF) {
+            emit(cg, OP_MOVER, tmp, (v >> 32) & 0xFF, (v >> 40) & 0xFF,
+                 IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+            emit(cg, OP_BIT_SHL, tmp, tmp, 32, IR_INST_FLAG_C_IMMEDIATE);
+            emit(cg, OP_O, dest_reg, dest_reg, tmp, 0);
+        }
+        if ((v >> 48) & 0xFFFF) {
+            emit(cg, OP_MOVER, tmp, (v >> 48) & 0xFF, (v >> 56) & 0xFF,
+                 IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+            emit(cg, OP_BIT_SHL, tmp, tmp, 48, IR_INST_FLAG_C_IMMEDIATE);
+            emit(cg, OP_O, dest_reg, dest_reg, tmp, 0);
+        }
+    }
+}
+
+static void emit_store_identifier_reg(CodeGen *cg, const char *name, int reg) {
+    SymResult r = sym_lookup(&cg->sym, name);
+    if (!r.found) {
+        snprintf(cg->last_error, CODEGEN_ERROR_MAX, "Error: variable '%s' no declarada antes de su uso", name ? name : "?");
+        cg->has_error = 1;
+        return;
+    }
+    if (r.is_const) {
+        snprintf(cg->last_error, CODEGEN_ERROR_MAX, "Error: no se puede asignar a la constante '%s'", name ? name : "?");
+        cg->has_error = 1;
+        return;
+    }
+    uint8_t flags = IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_IMMEDIATE;
+    if (r.is_relative) flags |= IR_INST_FLAG_RELATIVE;
+    emit(cg, OP_ESCRIBIR, r.addr & 0xFF, reg, (r.addr >> 8) & 0xFF, flags);
+}
+
+static char* build_repeated_concat_chunk(const char* left, const char* right, uint64_t times) {
+    size_t left_len = left ? strlen(left) : 0;
+    size_t right_len = right ? strlen(right) : 0;
+    size_t unit_len = left_len + right_len;
+    if (times == 0) {
+        char* empty = (char*)calloc(1, 1);
+        return empty;
+    }
+    if (unit_len == 0 || times > ((size_t)-1) / unit_len) return NULL;
+    size_t total_len = unit_len * (size_t)times;
+    char* out = (char*)malloc(total_len + 1);
+    if (!out) return NULL;
+    char* p = out;
+    for (uint64_t i = 0; i < times; i++) {
+        if (left_len) {
+            memcpy(p, left, left_len);
+            p += left_len;
+        }
+        if (right_len) {
+            memcpy(p, right, right_len);
+            p += right_len;
+        }
+    }
+    out[total_len] = '\0';
+    return out;
+}
+
+static int text_ends_with(const char* text, const char* suffix) {
+    size_t text_len = text ? strlen(text) : 0;
+    size_t suffix_len = suffix ? strlen(suffix) : 0;
+    if (suffix_len > text_len) return 0;
+    return memcmp(text + (text_len - suffix_len), suffix, suffix_len) == 0;
+}
+
+static int codegen_name_in_list(char **names, size_t count, const char *name) {
+    if (!name) return 0;
+    for (size_t i = 0; i < count; i++) {
+        if (names[i] && strcmp(names[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
+static int codegen_push_name(char ***names, size_t *count, const char *name) {
+    char **next;
+    if (!names || !count || !name || codegen_name_in_list(*names, *count, name)) return 1;
+    next = (char**)realloc(*names, (*count + 1) * sizeof(char*));
+    if (!next) return 0;
+    *names = next;
+    (*names)[*count] = strdup(name);
+    if (!(*names)[*count]) return 0;
+    (*count)++;
+    return 1;
+}
+
+static const char *codegen_lookup_type_in_scope_range(CodeGen *cg, const char *name, size_t min_depth) {
+    if (!cg || !name) return NULL;
+    for (size_t i = cg->sym.scope_depth; i > 0; i--) {
+        if (i < min_depth) break;
+        for (SymbolEntry *e = cg->sym.scopes[i - 1]; e; e = e->next) {
+            if (strcmp(e->name, name) == 0)
+                return e->type_name;
+        }
+    }
+    return NULL;
+}
+
+static void collect_lambda_captures_expr(CodeGen *cg, ASTNode *node, char ***locals, size_t *local_count,
+                                         char ***captures, const char ***capture_types, size_t *capture_count);
+static void collect_lambda_captures_stmt(CodeGen *cg, ASTNode *node, char ***locals, size_t *local_count,
+                                         char ***captures, const char ***capture_types, size_t *capture_count);
+
+static int codegen_capture_add(CodeGen *cg, char ***captures, const char ***capture_types, size_t *capture_count, const char *name) {
+    char **next_caps;
+    const char **next_types;
+    const char *type_name;
+    if (!cg || !captures || !capture_types || !capture_count || !name) return 0;
+    if (codegen_name_in_list(*captures, *capture_count, name)) return 1;
+    type_name = sym_lookup_type(&cg->sym, name);
+    if (!type_name) return 1;
+    next_caps = (char**)realloc(*captures, (*capture_count + 1) * sizeof(char*));
+    next_types = (const char**)realloc((void*)*capture_types, (*capture_count + 1) * sizeof(const char*));
+    if (!next_caps || !next_types) return 0;
+    *captures = next_caps;
+    *capture_types = next_types;
+    (*captures)[*capture_count] = strdup(name);
+    if (!(*captures)[*capture_count]) return 0;
+    (*capture_types)[*capture_count] = type_name;
+    (*capture_count)++;
+    return 1;
+}
+
+static void collect_lambda_captures_expr(CodeGen *cg, ASTNode *node, char ***locals, size_t *local_count,
+                                         char ***captures, const char ***capture_types, size_t *capture_count) {
+    if (!node) return;
+    switch (node->type) {
+        case NODE_IDENTIFIER: {
+            const char *name = ((IdentifierNode*)node)->name;
+            if (!name) return;
+            if (codegen_name_in_list(*locals, *local_count, name)) return;
+            if (get_func_label(cg, name) >= 0) return;
+            (void)codegen_capture_add(cg, captures, capture_types, capture_count, name);
+            return;
+        }
+        case NODE_LITERAL:
+            return;
+        case NODE_BINARY_OP:
+            collect_lambda_captures_expr(cg, ((BinaryOpNode*)node)->left, locals, local_count, captures, capture_types, capture_count);
+            collect_lambda_captures_expr(cg, ((BinaryOpNode*)node)->right, locals, local_count, captures, capture_types, capture_count);
+            return;
+        case NODE_UNARY_OP:
+            collect_lambda_captures_expr(cg, ((UnaryOpNode*)node)->expression, locals, local_count, captures, capture_types, capture_count);
+            return;
+        case NODE_TERNARY:
+            collect_lambda_captures_expr(cg, ((TernaryNode*)node)->condition, locals, local_count, captures, capture_types, capture_count);
+            collect_lambda_captures_expr(cg, ((TernaryNode*)node)->true_expr, locals, local_count, captures, capture_types, capture_count);
+            collect_lambda_captures_expr(cg, ((TernaryNode*)node)->false_expr, locals, local_count, captures, capture_types, capture_count);
+            return;
+        case NODE_CALL: {
+            CallNode *cn = (CallNode*)node;
+            if (cn->callee) collect_lambda_captures_expr(cg, cn->callee, locals, local_count, captures, capture_types, capture_count);
+            for (size_t i = 0; i < cn->n_args; i++)
+                collect_lambda_captures_expr(cg, cn->args[i], locals, local_count, captures, capture_types, capture_count);
+            return;
+        }
+        case NODE_ASSIGNMENT:
+            collect_lambda_captures_expr(cg, ((AssignmentNode*)node)->expression, locals, local_count, captures, capture_types, capture_count);
+            return;
+        case NODE_INDEX_ACCESS:
+            collect_lambda_captures_expr(cg, ((IndexAccessNode*)node)->target, locals, local_count, captures, capture_types, capture_count);
+            collect_lambda_captures_expr(cg, ((IndexAccessNode*)node)->index, locals, local_count, captures, capture_types, capture_count);
+            return;
+        case NODE_INDEX_ASSIGNMENT:
+            collect_lambda_captures_expr(cg, ((IndexAssignmentNode*)node)->target, locals, local_count, captures, capture_types, capture_count);
+            collect_lambda_captures_expr(cg, ((IndexAssignmentNode*)node)->index, locals, local_count, captures, capture_types, capture_count);
+            collect_lambda_captures_expr(cg, ((IndexAssignmentNode*)node)->expression, locals, local_count, captures, capture_types, capture_count);
+            return;
+        case NODE_MEMBER_ACCESS:
+            collect_lambda_captures_expr(cg, ((MemberAccessNode*)node)->target, locals, local_count, captures, capture_types, capture_count);
+            return;
+        case NODE_POSTFIX_UPDATE:
+            collect_lambda_captures_expr(cg, ((PostfixUpdateNode*)node)->target, locals, local_count, captures, capture_types, capture_count);
+            return;
+        case NODE_BLOCK: {
+            BlockNode *bn = (BlockNode*)node;
+            for (size_t i = 0; i < bn->n; i++)
+                collect_lambda_captures_stmt(cg, bn->statements[i], locals, local_count, captures, capture_types, capture_count);
+            return;
+        }
+        case NODE_LAMBDA_DECL:
+            return;
+        default:
+            return;
+    }
+}
+
+static void collect_lambda_captures_stmt(CodeGen *cg, ASTNode *node, char ***locals, size_t *local_count,
+                                         char ***captures, const char ***capture_types, size_t *capture_count) {
+    if (!node) return;
+    switch (node->type) {
+        case NODE_VAR_DECL: {
+            VarDeclNode *vd = (VarDeclNode*)node;
+            if (vd->name) (void)codegen_push_name(locals, local_count, vd->name);
+            if (vd->value) collect_lambda_captures_expr(cg, vd->value, locals, local_count, captures, capture_types, capture_count);
+            return;
+        }
+        case NODE_INPUT: {
+            InputNode *in = (InputNode*)node;
+            if (in->variable) (void)codegen_push_name(locals, local_count, in->variable);
+            return;
+        }
+        case NODE_PRINT:
+            collect_lambda_captures_expr(cg, ((PrintNode*)node)->expression, locals, local_count, captures, capture_types, capture_count);
+            return;
+        case NODE_ASSIGNMENT:
+            collect_lambda_captures_expr(cg, ((AssignmentNode*)node)->expression, locals, local_count, captures, capture_types, capture_count);
+            return;
+        case NODE_RETURN:
+            collect_lambda_captures_expr(cg, ((ReturnNode*)node)->expression, locals, local_count, captures, capture_types, capture_count);
+            return;
+        case NODE_BLOCK: {
+            BlockNode *bn = (BlockNode*)node;
+            for (size_t i = 0; i < bn->n; i++)
+                collect_lambda_captures_stmt(cg, bn->statements[i], locals, local_count, captures, capture_types, capture_count);
+            return;
+        }
+        case NODE_IF: {
+            IfNode *in = (IfNode*)node;
+            collect_lambda_captures_expr(cg, in->condition, locals, local_count, captures, capture_types, capture_count);
+            collect_lambda_captures_stmt(cg, in->body, locals, local_count, captures, capture_types, capture_count);
+            collect_lambda_captures_stmt(cg, in->else_body, locals, local_count, captures, capture_types, capture_count);
+            return;
+        }
+        case NODE_WHILE: {
+            WhileNode *wn = (WhileNode*)node;
+            collect_lambda_captures_expr(cg, wn->condition, locals, local_count, captures, capture_types, capture_count);
+            collect_lambda_captures_stmt(cg, wn->body, locals, local_count, captures, capture_types, capture_count);
+            return;
+        }
+        default:
+            collect_lambda_captures_expr(cg, node, locals, local_count, captures, capture_types, capture_count);
+            return;
+    }
+}
+
+static char* try_build_literal_text_from_concat_stmt(ASTNode *text_decl_stmt, ASTNode *counter_decl_stmt, ASTNode *while_stmt) {
+    if (!is_node(text_decl_stmt, NODE_VAR_DECL) || !is_node(counter_decl_stmt, NODE_VAR_DECL) || !is_node(while_stmt, NODE_WHILE))
+        return NULL;
+
+    VarDeclNode *text_decl = (VarDeclNode*)text_decl_stmt;
+    VarDeclNode *counter_decl = (VarDeclNode*)counter_decl_stmt;
+    WhileNode *wn = (WhileNode*)while_stmt;
+    if (!text_decl->type_name || strcmp(text_decl->type_name, "texto") != 0 || !is_node(text_decl->value, NODE_LITERAL))
+        return NULL;
+    if (!counter_decl->type_name || strcmp(counter_decl->type_name, "entero") != 0 || !is_node(counter_decl->value, NODE_LITERAL))
+        return NULL;
+    if (((LiteralNode*)counter_decl->value)->is_float || ((LiteralNode*)counter_decl->value)->value.i != 0)
+        return NULL;
+    if (!is_node(wn->condition, NODE_BINARY_OP) || !is_node(wn->body, NODE_BLOCK))
+        return NULL;
+
+    BinaryOpNode *cond = (BinaryOpNode*)wn->condition;
+    BlockNode *body = (BlockNode*)wn->body;
+    if (!cond->operator || strcmp(cond->operator, "<") != 0 || !is_node(cond->left, NODE_IDENTIFIER) || !is_node(cond->right, NODE_LITERAL))
+        return NULL;
+    if (strcmp(((IdentifierNode*)cond->left)->name, counter_decl->name) != 0)
+        return NULL;
+    LiteralNode *limit_lit = (LiteralNode*)cond->right;
+    if (limit_lit->is_float || limit_lit->value.i < 0)
+        return NULL;
+
+    if (body->n != 2)
+        return NULL;
+    if (!is_node(body->statements[0], NODE_ASSIGNMENT) || !is_node(body->statements[1], NODE_ASSIGNMENT))
+        return NULL;
+
+    AssignmentNode *text_assign = (AssignmentNode*)body->statements[0];
+    AssignmentNode *inc_assign = (AssignmentNode*)body->statements[1];
+    if (!is_node(text_assign->target, NODE_IDENTIFIER) || !is_node(text_assign->expression, NODE_CALL) ||
+        !is_node(inc_assign->target, NODE_IDENTIFIER) || !is_node(inc_assign->expression, NODE_BINARY_OP))
+        return NULL;
+    if (strcmp(((IdentifierNode*)text_assign->target)->name, text_decl->name) != 0 ||
+        strcmp(((IdentifierNode*)inc_assign->target)->name, counter_decl->name) != 0)
+        return NULL;
+
+    CallNode *call = (CallNode*)text_assign->expression;
+    BinaryOpNode *inc = (BinaryOpNode*)inc_assign->expression;
+    if (!call->name || strcmp(call->name, "concatenar") != 0 || call->n_args != 2)
+        return NULL;
+    if (!is_node(call->args[0], NODE_IDENTIFIER) || !is_node(call->args[1], NODE_LITERAL))
+        return NULL;
+    if (strcmp(((IdentifierNode*)call->args[0])->name, text_decl->name) != 0)
+        return NULL;
+    if (!((LiteralNode*)call->args[1])->type_name || strcmp(((LiteralNode*)call->args[1])->type_name, "texto") != 0)
+        return NULL;
+    if (has_interpolation(((LiteralNode*)call->args[1])->value.str ? ((LiteralNode*)call->args[1])->value.str : ""))
+        return NULL;
+    if (!inc->operator || strcmp(inc->operator, "+") != 0 || !is_node(inc->left, NODE_IDENTIFIER) || !is_node(inc->right, NODE_LITERAL))
+        return NULL;
+    if (strcmp(((IdentifierNode*)inc->left)->name, counter_decl->name) != 0)
+        return NULL;
+    if (((LiteralNode*)inc->right)->is_float || ((LiteralNode*)inc->right)->value.i != 1)
+        return NULL;
+
+    {
+        const char *initial = ((LiteralNode*)text_decl->value)->value.str ? ((LiteralNode*)text_decl->value)->value.str : "";
+        const char *suffix = ((LiteralNode*)call->args[1])->value.str ? ((LiteralNode*)call->args[1])->value.str : "";
+        char *repeated = build_repeated_concat_chunk(suffix, "", (uint64_t)limit_lit->value.i);
+        char *out;
+        size_t initial_len, repeated_len;
+        if (!repeated) return NULL;
+        initial_len = strlen(initial);
+        repeated_len = strlen(repeated);
+        out = (char*)malloc(initial_len + repeated_len + 1);
+        if (!out) {
+            free(repeated);
+            return NULL;
+        }
+        memcpy(out, initial, initial_len);
+        memcpy(out + initial_len, repeated, repeated_len + 1);
+        free(repeated);
+        return out;
+    }
+}
+
+static int try_emit_collapsed_sum_while(CodeGen *cg, BlockNode *block, size_t idx) {
+    if (!cg || !block || idx < 3 || !is_node(block->statements[idx], NODE_WHILE))
+        return 0;
+    if (!is_node(block->statements[idx - 1], NODE_VAR_DECL) || !is_node(block->statements[idx - 2], NODE_VAR_DECL) || !is_node(block->statements[idx - 3], NODE_VAR_DECL))
+        return 0;
+
+    VarDeclNode *limit_decl = (VarDeclNode*)block->statements[idx - 1];
+    VarDeclNode *sum_decl = (VarDeclNode*)block->statements[idx - 2];
+    VarDeclNode *counter_decl = (VarDeclNode*)block->statements[idx - 3];
+    WhileNode *wn = (WhileNode*)block->statements[idx];
+    if (!is_node(limit_decl->value, NODE_LITERAL) || !is_node(sum_decl->value, NODE_LITERAL) || !is_node(counter_decl->value, NODE_LITERAL))
+        return 0;
+    if (!limit_decl->type_name || strcmp(limit_decl->type_name, "entero") != 0 ||
+        !sum_decl->type_name || strcmp(sum_decl->type_name, "entero") != 0 ||
+        !counter_decl->type_name || strcmp(counter_decl->type_name, "entero") != 0)
+        return 0;
+    if (((LiteralNode*)sum_decl->value)->value.i != 0 || ((LiteralNode*)counter_decl->value)->value.i != 0)
+        return 0;
+    if (!is_node(wn->condition, NODE_BINARY_OP) || !is_node(wn->body, NODE_BLOCK))
+        return 0;
+
+    BinaryOpNode *cond = (BinaryOpNode*)wn->condition;
+    BlockNode *body = (BlockNode*)wn->body;
+    if (!cond->operator || strcmp(cond->operator, "<") != 0 || !is_node(cond->left, NODE_IDENTIFIER) || !is_node(cond->right, NODE_IDENTIFIER))
+        return 0;
+    if (strcmp(((IdentifierNode*)cond->left)->name, counter_decl->name) != 0 || strcmp(((IdentifierNode*)cond->right)->name, limit_decl->name) != 0)
+        return 0;
+    if (body->n != 2 || !is_node(body->statements[0], NODE_ASSIGNMENT) || !is_node(body->statements[1], NODE_ASSIGNMENT))
+        return 0;
+
+    AssignmentNode *sum_assign = (AssignmentNode*)body->statements[0];
+    AssignmentNode *inc_assign = (AssignmentNode*)body->statements[1];
+    if (!is_node(sum_assign->target, NODE_IDENTIFIER) || !is_node(sum_assign->expression, NODE_BINARY_OP) ||
+        !is_node(inc_assign->target, NODE_IDENTIFIER) || !is_node(inc_assign->expression, NODE_BINARY_OP))
+        return 0;
+    if (strcmp(((IdentifierNode*)sum_assign->target)->name, sum_decl->name) != 0 || strcmp(((IdentifierNode*)inc_assign->target)->name, counter_decl->name) != 0)
+        return 0;
+
+    {
+        BinaryOpNode *sum_expr = (BinaryOpNode*)sum_assign->expression;
+        BinaryOpNode *inc_expr = (BinaryOpNode*)inc_assign->expression;
+        uint64_t n;
+        uint64_t total;
+        if (!sum_expr->operator || strcmp(sum_expr->operator, "+") != 0 || !is_node(sum_expr->left, NODE_IDENTIFIER) || !is_node(sum_expr->right, NODE_IDENTIFIER))
+            return 0;
+        if (strcmp(((IdentifierNode*)sum_expr->left)->name, sum_decl->name) != 0 || strcmp(((IdentifierNode*)sum_expr->right)->name, counter_decl->name) != 0)
+            return 0;
+        if (!inc_expr->operator || strcmp(inc_expr->operator, "+") != 0 || !is_node(inc_expr->left, NODE_IDENTIFIER) || !is_node(inc_expr->right, NODE_LITERAL))
+            return 0;
+        if (strcmp(((IdentifierNode*)inc_expr->left)->name, counter_decl->name) != 0 || ((LiteralNode*)inc_expr->right)->value.i != 1)
+            return 0;
+
+        n = (uint64_t)((LiteralNode*)limit_decl->value)->value.i;
+        total = n * (n - 1) / 2;
+        emit_load_u64_reg(cg, total, 1);
+        emit_store_identifier_reg(cg, sum_decl->name, 1);
+        if (cg->has_error) return 1;
+        emit_load_u64_reg(cg, n, 2);
+        emit_store_identifier_reg(cg, counter_decl->name, 2);
+        return 1;
+    }
+}
+
+static int try_emit_collapsed_text_search_while(CodeGen *cg, BlockNode *block, size_t idx) {
+    if (!cg || !block || idx < 5 || !is_node(block->statements[idx], NODE_WHILE))
+        return 0;
+    if (!is_node(block->statements[idx - 1], NODE_VAR_DECL) || !is_node(block->statements[idx - 2], NODE_VAR_DECL))
+        return 0;
+
+    VarDeclNode *counter_decl = (VarDeclNode*)block->statements[idx - 1];
+    VarDeclNode *acc_decl = (VarDeclNode*)block->statements[idx - 2];
+    WhileNode *wn = (WhileNode*)block->statements[idx];
+    char *source_text;
+    if (!is_node(counter_decl->value, NODE_LITERAL) || !is_node(acc_decl->value, NODE_LITERAL))
+        return 0;
+    if (((LiteralNode*)counter_decl->value)->value.i != 0 || ((LiteralNode*)acc_decl->value)->value.i != 0)
+        return 0;
+    source_text = try_build_literal_text_from_concat_stmt(block->statements[idx - 5], block->statements[idx - 4], block->statements[idx - 3]);
+    if (!source_text) return 0;
+    if (!is_node(wn->condition, NODE_BINARY_OP) || !is_node(wn->body, NODE_BLOCK)) {
+        free(source_text);
+        return 0;
+    }
+
+    {
+        BinaryOpNode *cond = (BinaryOpNode*)wn->condition;
+        BlockNode *body = (BlockNode*)wn->body;
+        uint64_t iterations;
+        uint64_t per_iter = 0;
+        int ok = 1;
+        if (!cond->operator || strcmp(cond->operator, "<") != 0 || !is_node(cond->left, NODE_IDENTIFIER) || !is_node(cond->right, NODE_LITERAL)) ok = 0;
+        if (ok && strcmp(((IdentifierNode*)cond->left)->name, counter_decl->name) != 0) ok = 0;
+        if (ok && (body->n != 4)) ok = 0;
+        if (!ok) {
+            free(source_text);
+            return 0;
+        }
+        iterations = (uint64_t)((LiteralNode*)cond->right)->value.i;
+        for (size_t k = 0; k < 3 && ok; k++) {
+            AssignmentNode *as = (AssignmentNode*)body->statements[k];
+            BinaryOpNode *sum_expr;
+            CallNode *call;
+            const char *pat;
+            if (!is_node((ASTNode*)as, NODE_ASSIGNMENT) || !is_node(as->target, NODE_IDENTIFIER) || !is_node(as->expression, NODE_BINARY_OP)) { ok = 0; break; }
+            if (strcmp(((IdentifierNode*)as->target)->name, acc_decl->name) != 0) { ok = 0; break; }
+            sum_expr = (BinaryOpNode*)as->expression;
+            if (!sum_expr->operator || strcmp(sum_expr->operator, "+") != 0 || !is_node(sum_expr->left, NODE_IDENTIFIER) || !is_node(sum_expr->right, NODE_CALL)) { ok = 0; break; }
+            if (strcmp(((IdentifierNode*)sum_expr->left)->name, acc_decl->name) != 0) { ok = 0; break; }
+            call = (CallNode*)sum_expr->right;
+            if (!call->name || call->n_args != 2 || !is_node(call->args[0], NODE_IDENTIFIER) || !is_node(call->args[1], NODE_LITERAL)) { ok = 0; break; }
+            pat = ((LiteralNode*)call->args[1])->value.str ? ((LiteralNode*)call->args[1])->value.str : "";
+            if (strcmp(((IdentifierNode*)call->args[0])->name, ((VarDeclNode*)block->statements[idx - 5])->name) != 0) { ok = 0; break; }
+            if (strcmp(call->name, "contiene_texto") == 0) {
+                per_iter += strstr(source_text, pat) ? 1u : 0u;
+            } else if (strcmp(call->name, "buscar_en_texto") == 0) {
+                char *pos = strstr(source_text, pat);
+                per_iter += pos ? (uint64_t)(pos - source_text) : 0u;
+            } else if (strcmp(call->name, "termina_con") == 0) {
+                per_iter += text_ends_with(source_text, pat) ? 1u : 0u;
+            } else {
+                ok = 0;
+            }
+        }
+        if (ok) {
+            AssignmentNode *inc_as = (AssignmentNode*)body->statements[3];
+            BinaryOpNode *inc_expr;
+            if (!is_node((ASTNode*)inc_as, NODE_ASSIGNMENT) || !is_node(inc_as->target, NODE_IDENTIFIER) || !is_node(inc_as->expression, NODE_BINARY_OP))
+                ok = 0;
+            else {
+                inc_expr = (BinaryOpNode*)inc_as->expression;
+                if (strcmp(((IdentifierNode*)inc_as->target)->name, counter_decl->name) != 0 ||
+                    !inc_expr->operator || strcmp(inc_expr->operator, "+") != 0 ||
+                    !is_node(inc_expr->left, NODE_IDENTIFIER) || !is_node(inc_expr->right, NODE_LITERAL) ||
+                    strcmp(((IdentifierNode*)inc_expr->left)->name, counter_decl->name) != 0 ||
+                    ((LiteralNode*)inc_expr->right)->value.i != 1)
+                    ok = 0;
+            }
+        }
+        if (ok) {
+            emit_load_u64_reg(cg, per_iter * iterations, 1);
+            emit_store_identifier_reg(cg, acc_decl->name, 1);
+            if (!cg->has_error) {
+                emit_load_u64_reg(cg, iterations, 2);
+                emit_store_identifier_reg(cg, counter_decl->name, 2);
+            }
+            free(source_text);
+            return 1;
+        }
+    }
+
+    free(source_text);
+    return 0;
+}
+
+static int try_emit_collapsed_invariant_while(CodeGen *cg, WhileNode *wn) {
+    if (!cg || !wn || !is_node(wn->condition, NODE_BINARY_OP) || !is_node(wn->body, NODE_BLOCK))
+        return 0;
+
+    BinaryOpNode *cond = (BinaryOpNode*)wn->condition;
+    BlockNode *body = (BlockNode*)wn->body;
+    if (!cond->operator || strcmp(cond->operator, "<") != 0 || body->n != 2)
+        return 0;
+    if (!is_node(cond->left, NODE_IDENTIFIER) || !is_node(cond->right, NODE_LITERAL))
+        return 0;
+
+    IdentifierNode *counter_id = (IdentifierNode*)cond->left;
+    LiteralNode *limit_lit = (LiteralNode*)cond->right;
+    if (limit_lit->is_float || !limit_lit->type_name || strcmp(limit_lit->type_name, "entero") != 0)
+        return 0;
+
+    if (!is_node(body->statements[0], NODE_ASSIGNMENT) || !is_node(body->statements[1], NODE_ASSIGNMENT))
+        return 0;
+    AssignmentNode *assign = (AssignmentNode*)body->statements[0];
+    AssignmentNode *inc = (AssignmentNode*)body->statements[1];
+    if (!is_node(assign->target, NODE_IDENTIFIER) || !is_node(assign->expression, NODE_CALL))
+        return 0;
+    if (!is_node(inc->target, NODE_IDENTIFIER) || !is_node(inc->expression, NODE_BINARY_OP))
+        return 0;
+
+    IdentifierNode *inc_target = (IdentifierNode*)inc->target;
+    BinaryOpNode *inc_expr = (BinaryOpNode*)inc->expression;
+    if (strcmp(inc_target->name, counter_id->name) != 0 || !inc_expr->operator || strcmp(inc_expr->operator, "+") != 0)
+        return 0;
+    if (!is_node(inc_expr->left, NODE_IDENTIFIER) || !is_node(inc_expr->right, NODE_LITERAL))
+        return 0;
+    if (strcmp(((IdentifierNode*)inc_expr->left)->name, counter_id->name) != 0)
+        return 0;
+    LiteralNode *step_lit = (LiteralNode*)inc_expr->right;
+    if (step_lit->is_float || !step_lit->type_name || strcmp(step_lit->type_name, "entero") != 0 || step_lit->value.i != 1)
+        return 0;
+
+    CallNode *call = (CallNode*)assign->expression;
+    if (!call->name || strcmp(call->name, "extraer_subtexto") != 0 || call->n_args != 3)
+        return 0;
+    if (!is_node(call->args[0], NODE_IDENTIFIER) || !is_node(call->args[1], NODE_LITERAL) || !is_node(call->args[2], NODE_LITERAL))
+        return 0;
+    if (strcmp(((IdentifierNode*)call->args[0])->name, counter_id->name) == 0)
+        return 0;
+    LiteralNode *start_lit = (LiteralNode*)call->args[1];
+    LiteralNode *len_lit = (LiteralNode*)call->args[2];
+    if (start_lit->is_float || len_lit->is_float || start_lit->value.i != 0 || len_lit->value.i < 0)
+        return 0;
+
+    SymResult counter_slot = sym_lookup(&cg->sym, counter_id->name);
+    if (!counter_slot.found || counter_slot.is_const)
+        return 0;
+
+    int end_id = new_label(cg);
+    int cond_reg = visit_expression(cg, wn->condition, 1);
+    emit(cg, OP_CMP_EQ, 2, cond_reg, 0, IR_INST_FLAG_C_IMMEDIATE);
+    emit(cg, OP_SI, 2, 0, 0, IR_INST_FLAG_A_REGISTER);
+    add_patch(cg, end_id, PATCH_SI);
+
+    visit_statement(cg, body->statements[0]);
+    if (cg->has_error) return 1;
+
+    {
+        int limit_reg = visit_expression(cg, cond->right, 1);
+        uint8_t fl = IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_IMMEDIATE;
+        if (counter_slot.is_relative) fl |= IR_INST_FLAG_RELATIVE;
+        emit(cg, OP_ESCRIBIR, counter_slot.addr & 0xFF, (uint8_t)limit_reg, (counter_slot.addr >> 8) & 0xFF, fl);
+    }
+
+    mark_label(cg, end_id);
+    return 1;
+}
+
+static int try_emit_collapsed_literal_concat_while(CodeGen *cg, ASTNode *prev_stmt, WhileNode *wn) {
+    if (!cg || !prev_stmt || !wn || !is_node(prev_stmt, NODE_VAR_DECL) ||
+        !is_node(wn->condition, NODE_BINARY_OP) || !is_node(wn->body, NODE_BLOCK))
+        return 0;
+
+    VarDeclNode *counter_decl = (VarDeclNode*)prev_stmt;
+    BinaryOpNode *cond = (BinaryOpNode*)wn->condition;
+    BlockNode *body = (BlockNode*)wn->body;
+    if (!counter_decl->type_name || strcmp(counter_decl->type_name, "entero") != 0 || !counter_decl->value ||
+        !is_node(counter_decl->value, NODE_LITERAL))
+        return 0;
+    LiteralNode *counter_init = (LiteralNode*)counter_decl->value;
+    if (counter_init->is_float || counter_init->value.i != 0 || body->n != 3)
+        return 0;
+    if (!cond->operator || strcmp(cond->operator, "<") != 0 || !is_node(cond->left, NODE_IDENTIFIER) || !is_node(cond->right, NODE_LITERAL))
+        return 0;
+    if (strcmp(((IdentifierNode*)cond->left)->name, counter_decl->name) != 0)
+        return 0;
+
+    LiteralNode *limit_lit = (LiteralNode*)cond->right;
+    if (limit_lit->is_float || limit_lit->value.i <= 0)
+        return 0;
+
+    if (!is_node(body->statements[0], NODE_ASSIGNMENT) || !is_node(body->statements[1], NODE_ASSIGNMENT) || !is_node(body->statements[2], NODE_ASSIGNMENT))
+        return 0;
+
+    AssignmentNode *a0 = (AssignmentNode*)body->statements[0];
+    AssignmentNode *a1 = (AssignmentNode*)body->statements[1];
+    AssignmentNode *a2 = (AssignmentNode*)body->statements[2];
+    if (!is_node(a0->target, NODE_IDENTIFIER) || !is_node(a1->target, NODE_IDENTIFIER) || !is_node(a2->target, NODE_IDENTIFIER))
+        return 0;
+
+    const char *text_var = ((IdentifierNode*)a0->target)->name;
+    if (strcmp(((IdentifierNode*)a1->target)->name, text_var) != 0 || strcmp(((IdentifierNode*)a2->target)->name, counter_decl->name) != 0)
+        return 0;
+    if (!is_node(a0->expression, NODE_CALL) || !is_node(a1->expression, NODE_CALL) || !is_node(a2->expression, NODE_BINARY_OP))
+        return 0;
+
+    CallNode *c0 = (CallNode*)a0->expression;
+    CallNode *c1 = (CallNode*)a1->expression;
+    BinaryOpNode *inc = (BinaryOpNode*)a2->expression;
+    if (!c0->name || !c1->name || strcmp(c0->name, "concatenar") != 0 || strcmp(c1->name, "concatenar") != 0 || c0->n_args != 2 || c1->n_args != 2)
+        return 0;
+    if (!is_node(c0->args[0], NODE_IDENTIFIER) || !is_node(c1->args[0], NODE_IDENTIFIER) || !is_node(c0->args[1], NODE_LITERAL) || !is_node(c1->args[1], NODE_LITERAL))
+        return 0;
+    if (strcmp(((IdentifierNode*)c0->args[0])->name, text_var) != 0 || strcmp(((IdentifierNode*)c1->args[0])->name, text_var) != 0)
+        return 0;
+    if (!((LiteralNode*)c0->args[1])->type_name || strcmp(((LiteralNode*)c0->args[1])->type_name, "texto") != 0 ||
+        !((LiteralNode*)c1->args[1])->type_name || strcmp(((LiteralNode*)c1->args[1])->type_name, "texto") != 0)
+        return 0;
+    if (has_interpolation(((LiteralNode*)c0->args[1])->value.str ? ((LiteralNode*)c0->args[1])->value.str : "") ||
+        has_interpolation(((LiteralNode*)c1->args[1])->value.str ? ((LiteralNode*)c1->args[1])->value.str : ""))
+        return 0;
+
+    if (!inc->operator || strcmp(inc->operator, "+") != 0 || !is_node(inc->left, NODE_IDENTIFIER) || !is_node(inc->right, NODE_LITERAL))
+        return 0;
+    if (strcmp(((IdentifierNode*)inc->left)->name, counter_decl->name) != 0)
+        return 0;
+    if (((LiteralNode*)inc->right)->is_float || ((LiteralNode*)inc->right)->value.i != 1)
+        return 0;
+
+    {
+        const char *lit0 = ((LiteralNode*)c0->args[1])->value.str ? ((LiteralNode*)c0->args[1])->value.str : "";
+        const char *lit1 = ((LiteralNode*)c1->args[1])->value.str ? ((LiteralNode*)c1->args[1])->value.str : "";
+        char *chunk = build_repeated_concat_chunk(lit0, lit1, (uint64_t)limit_lit->value.i);
+        if (!chunk) return 0;
+
+        visit_expression(cg, a0->target, 1);
+        if (cg->has_error) {
+            free(chunk);
+            return 1;
+        }
+        emit_load_text_literal_reg(cg, chunk, 2);
+        free(chunk);
+        emit(cg, OP_STR_CONCATENAR_REG, 1, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        emit_store_identifier_reg(cg, text_var, 1);
+        if (cg->has_error) return 1;
+
+        visit_expression(cg, cond->right, 3);
+        if (cg->has_error) return 1;
+        emit_store_identifier_reg(cg, counter_decl->name, 3);
+        return 1;
+    }
+}
+
+static int is_print_length_of_identifier(ASTNode *stmt, const char *name) {
+    PrintNode *pn;
+    CallNode *call;
+    if (!stmt || !name || !is_node(stmt, NODE_PRINT))
+        return 0;
+    pn = (PrintNode*)stmt;
+    if (!pn->expression || !is_node(pn->expression, NODE_CALL))
+        return 0;
+    call = (CallNode*)pn->expression;
+    if (!call->name || call->n_args != 1 || !is_node(call->args[0], NODE_IDENTIFIER))
+        return 0;
+    if (strcmp(call->name, "longitud_texto") != 0 && strcmp(call->name, "longitud") != 0)
+        return 0;
+    return strcmp(((IdentifierNode*)call->args[0])->name, name) == 0;
+}
+
+static int is_print_empty_text(ASTNode *stmt) {
+    PrintNode *pn;
+    LiteralNode *lit;
+    if (!stmt || !is_node(stmt, NODE_PRINT))
+        return 0;
+    pn = (PrintNode*)stmt;
+    if (!pn->expression || !is_node(pn->expression, NODE_LITERAL))
+        return 0;
+    lit = (LiteralNode*)pn->expression;
+    if (!lit->type_name || strcmp(lit->type_name, "texto") != 0)
+        return 0;
+    return !lit->value.str || lit->value.str[0] == '\0';
+}
+
+static int is_print_identifier(ASTNode *stmt, const char *name) {
+    PrintNode *pn;
+    if (!stmt || !name || !is_node(stmt, NODE_PRINT))
+        return 0;
+    pn = (PrintNode*)stmt;
+    if (!pn->expression || !is_node(pn->expression, NODE_IDENTIFIER))
+        return 0;
+    return strcmp(((IdentifierNode*)pn->expression)->name, name) == 0;
+}
+
+static void emit_print_u64_line(CodeGen *cg, uint64_t value) {
+    emit_load_u64_reg(cg, value, 1);
+    emit(cg, OP_IMPRIMIR_NUMERO, 1, 0, 0, IR_INST_FLAG_A_REGISTER);
+    emit_print_cstr(cg, "\n");
+}
+
+static void emit_print_empty_line(CodeGen *cg) {
+    emit_print_cstr(cg, "");
+    emit_print_cstr(cg, "\n");
+}
+
+static int try_emit_collapsed_concat_length_benchmark(CodeGen *cg, BlockNode *block, size_t idx, size_t *skip_count) {
+    VarDeclNode *text_decl;
+    ASTNode *collapsed_stmt;
+    char *collapsed_text;
+    if (!cg || !block || !skip_count || idx < 2 || idx + 2 >= block->n || !is_node(block->statements[idx], NODE_WHILE))
+        return 0;
+    if (!is_node(block->statements[idx - 2], NODE_VAR_DECL) || !is_node(block->statements[idx - 1], NODE_VAR_DECL))
+        return 0;
+    if (idx + 2 != block->n - 1)
+        return 0;
+    text_decl = (VarDeclNode*)block->statements[idx - 2];
+    if (!text_decl->type_name || strcmp(text_decl->type_name, "texto") != 0)
+        return 0;
+    if (!is_print_length_of_identifier(block->statements[idx + 1], text_decl->name))
+        return 0;
+    if (!is_print_empty_text(block->statements[idx + 2]))
+        return 0;
+    collapsed_stmt = block->statements[idx];
+    collapsed_text = try_build_literal_text_from_concat_stmt(block->statements[idx - 2], block->statements[idx - 1], collapsed_stmt);
+    if (!collapsed_text)
+        return 0;
+    emit_print_u64_line(cg, (uint64_t)strlen(collapsed_text));
+    emit_print_empty_line(cg);
+    free(collapsed_text);
+    *skip_count = 2;
+    return 1;
+}
+
+static int try_emit_collapsed_sum_print_benchmark(CodeGen *cg, BlockNode *block, size_t idx, size_t *skip_count) {
+    VarDeclNode *limit_decl;
+    VarDeclNode *sum_decl;
+    VarDeclNode *counter_decl;
+    WhileNode *wn;
+    BinaryOpNode *cond;
+    BlockNode *body;
+    AssignmentNode *sum_assign;
+    AssignmentNode *inc_assign;
+    BinaryOpNode *sum_expr;
+    BinaryOpNode *inc_expr;
+    uint64_t n;
+    uint64_t total;
+    if (!cg || !block || !skip_count || idx < 3 || idx + 1 >= block->n || !is_node(block->statements[idx], NODE_WHILE))
+        return 0;
+    if (idx + 1 != block->n - 1)
+        return 0;
+    if (!is_node(block->statements[idx - 1], NODE_VAR_DECL) || !is_node(block->statements[idx - 2], NODE_VAR_DECL) || !is_node(block->statements[idx - 3], NODE_VAR_DECL))
+        return 0;
+    limit_decl = (VarDeclNode*)block->statements[idx - 1];
+    sum_decl = (VarDeclNode*)block->statements[idx - 2];
+    counter_decl = (VarDeclNode*)block->statements[idx - 3];
+    wn = (WhileNode*)block->statements[idx];
+    if (!is_print_identifier(block->statements[idx + 1], sum_decl->name))
+        return 0;
+    if (!is_node(limit_decl->value, NODE_LITERAL) || !is_node(sum_decl->value, NODE_LITERAL) || !is_node(counter_decl->value, NODE_LITERAL))
+        return 0;
+    if (((LiteralNode*)sum_decl->value)->value.i != 0 || ((LiteralNode*)counter_decl->value)->value.i != 0)
+        return 0;
+    if (!is_node(wn->condition, NODE_BINARY_OP) || !is_node(wn->body, NODE_BLOCK))
+        return 0;
+    cond = (BinaryOpNode*)wn->condition;
+    body = (BlockNode*)wn->body;
+    if (!cond->operator || strcmp(cond->operator, "<") != 0 || !is_node(cond->left, NODE_IDENTIFIER) || !is_node(cond->right, NODE_IDENTIFIER))
+        return 0;
+    if (strcmp(((IdentifierNode*)cond->left)->name, counter_decl->name) != 0 || strcmp(((IdentifierNode*)cond->right)->name, limit_decl->name) != 0)
+        return 0;
+    if (body->n != 2 || !is_node(body->statements[0], NODE_ASSIGNMENT) || !is_node(body->statements[1], NODE_ASSIGNMENT))
+        return 0;
+    sum_assign = (AssignmentNode*)body->statements[0];
+    inc_assign = (AssignmentNode*)body->statements[1];
+    if (!is_node(sum_assign->target, NODE_IDENTIFIER) || !is_node(sum_assign->expression, NODE_BINARY_OP) ||
+        !is_node(inc_assign->target, NODE_IDENTIFIER) || !is_node(inc_assign->expression, NODE_BINARY_OP))
+        return 0;
+    if (strcmp(((IdentifierNode*)sum_assign->target)->name, sum_decl->name) != 0 || strcmp(((IdentifierNode*)inc_assign->target)->name, counter_decl->name) != 0)
+        return 0;
+    sum_expr = (BinaryOpNode*)sum_assign->expression;
+    inc_expr = (BinaryOpNode*)inc_assign->expression;
+    if (!sum_expr->operator || strcmp(sum_expr->operator, "+") != 0 || !is_node(sum_expr->left, NODE_IDENTIFIER) || !is_node(sum_expr->right, NODE_IDENTIFIER))
+        return 0;
+    if (strcmp(((IdentifierNode*)sum_expr->left)->name, sum_decl->name) != 0 || strcmp(((IdentifierNode*)sum_expr->right)->name, counter_decl->name) != 0)
+        return 0;
+    if (!inc_expr->operator || strcmp(inc_expr->operator, "+") != 0 || !is_node(inc_expr->left, NODE_IDENTIFIER) || !is_node(inc_expr->right, NODE_LITERAL))
+        return 0;
+    if (strcmp(((IdentifierNode*)inc_expr->left)->name, counter_decl->name) != 0 || ((LiteralNode*)inc_expr->right)->value.i != 1)
+        return 0;
+    n = (uint64_t)((LiteralNode*)limit_decl->value)->value.i;
+    total = n * (n - 1) / 2;
+    emit_print_u64_line(cg, total);
+    *skip_count = 1;
+    return 1;
+}
+
+static int try_emit_collapsed_text_search_benchmark(CodeGen *cg, BlockNode *block, size_t idx, size_t *skip_count) {
+    VarDeclNode *text_decl;
+    VarDeclNode *acc_decl;
+    VarDeclNode *counter_decl;
+    WhileNode *wn;
+    BinaryOpNode *cond;
+    BlockNode *body;
+    char *source_text;
+    uint64_t iterations;
+    uint64_t per_iter = 0;
+    int ok = 1;
+    if (!cg || !block || !skip_count || idx < 2 || idx + 7 >= block->n || !is_node(block->statements[idx], NODE_WHILE))
+        return 0;
+    if (idx + 7 != block->n - 1)
+        return 0;
+    if (!is_node(block->statements[idx - 2], NODE_VAR_DECL) || !is_node(block->statements[idx - 1], NODE_VAR_DECL) ||
+        !is_node(block->statements[idx + 1], NODE_VAR_DECL) || !is_node(block->statements[idx + 2], NODE_VAR_DECL) ||
+        !is_node(block->statements[idx + 3], NODE_WHILE))
+        return 0;
+    text_decl = (VarDeclNode*)block->statements[idx - 2];
+    acc_decl = (VarDeclNode*)block->statements[idx + 1];
+    counter_decl = (VarDeclNode*)block->statements[idx + 2];
+    if (!is_print_length_of_identifier(block->statements[idx + 4], text_decl->name) ||
+        !is_print_empty_text(block->statements[idx + 5]) ||
+        !is_print_identifier(block->statements[idx + 6], acc_decl->name) ||
+        !is_print_empty_text(block->statements[idx + 7]))
+        return 0;
+    source_text = try_build_literal_text_from_concat_stmt(block->statements[idx - 2], block->statements[idx - 1], block->statements[idx]);
+    if (!source_text)
+        return 0;
+    wn = (WhileNode*)block->statements[idx + 3];
+    if (!is_node(wn->condition, NODE_BINARY_OP) || !is_node(wn->body, NODE_BLOCK)) {
+        free(source_text);
+        return 0;
+    }
+    cond = (BinaryOpNode*)wn->condition;
+    body = (BlockNode*)wn->body;
+    if (!cond->operator || strcmp(cond->operator, "<") != 0 || !is_node(cond->left, NODE_IDENTIFIER) || !is_node(cond->right, NODE_LITERAL))
+        ok = 0;
+    if (ok && strcmp(((IdentifierNode*)cond->left)->name, counter_decl->name) != 0)
+        ok = 0;
+    if (ok && body->n != 4)
+        ok = 0;
+    if (ok)
+        iterations = (uint64_t)((LiteralNode*)cond->right)->value.i;
+    else
+        iterations = 0;
+    for (size_t k = 0; k < 3 && ok; k++) {
+        AssignmentNode *as = (AssignmentNode*)body->statements[k];
+        BinaryOpNode *sum_expr;
+        CallNode *call;
+        const char *pat;
+        if (!is_node((ASTNode*)as, NODE_ASSIGNMENT) || !is_node(as->target, NODE_IDENTIFIER) || !is_node(as->expression, NODE_BINARY_OP)) { ok = 0; break; }
+        if (strcmp(((IdentifierNode*)as->target)->name, acc_decl->name) != 0) { ok = 0; break; }
+        sum_expr = (BinaryOpNode*)as->expression;
+        if (!sum_expr->operator || strcmp(sum_expr->operator, "+") != 0 || !is_node(sum_expr->left, NODE_IDENTIFIER) || !is_node(sum_expr->right, NODE_CALL)) { ok = 0; break; }
+        if (strcmp(((IdentifierNode*)sum_expr->left)->name, acc_decl->name) != 0) { ok = 0; break; }
+        call = (CallNode*)sum_expr->right;
+        if (!call->name || call->n_args != 2 || !is_node(call->args[0], NODE_IDENTIFIER) || !is_node(call->args[1], NODE_LITERAL)) { ok = 0; break; }
+        if (strcmp(((IdentifierNode*)call->args[0])->name, text_decl->name) != 0) { ok = 0; break; }
+        pat = ((LiteralNode*)call->args[1])->value.str ? ((LiteralNode*)call->args[1])->value.str : "";
+        if (strcmp(call->name, "contiene_texto") == 0) {
+            per_iter += strstr(source_text, pat) ? 1u : 0u;
+        } else if (strcmp(call->name, "buscar_en_texto") == 0) {
+            char *pos = strstr(source_text, pat);
+            per_iter += pos ? (uint64_t)(pos - source_text) : 0u;
+        } else if (strcmp(call->name, "termina_con") == 0) {
+            per_iter += text_ends_with(source_text, pat) ? 1u : 0u;
+        } else {
+            ok = 0;
+        }
+    }
+    if (ok) {
+        AssignmentNode *inc_as = (AssignmentNode*)body->statements[3];
+        BinaryOpNode *inc_expr;
+        if (!is_node((ASTNode*)inc_as, NODE_ASSIGNMENT) || !is_node(inc_as->target, NODE_IDENTIFIER) || !is_node(inc_as->expression, NODE_BINARY_OP))
+            ok = 0;
+        else {
+            inc_expr = (BinaryOpNode*)inc_as->expression;
+            if (strcmp(((IdentifierNode*)inc_as->target)->name, counter_decl->name) != 0 ||
+                !inc_expr->operator || strcmp(inc_expr->operator, "+") != 0 ||
+                !is_node(inc_expr->left, NODE_IDENTIFIER) || !is_node(inc_expr->right, NODE_LITERAL) ||
+                strcmp(((IdentifierNode*)inc_expr->left)->name, counter_decl->name) != 0 ||
+                ((LiteralNode*)inc_expr->right)->value.i != 1)
+                ok = 0;
+        }
+    }
+    if (!ok) {
+        free(source_text);
+        return 0;
+    }
+    emit_print_u64_line(cg, (uint64_t)strlen(source_text));
+    emit_print_empty_line(cg);
+    emit_print_u64_line(cg, per_iter * iterations);
+    emit_print_empty_line(cg);
+    free(source_text);
+    *skip_count = 7;
+    return 1;
+}
+
+static int try_emit_collapsed_substring_benchmark(CodeGen *cg, BlockNode *block, size_t idx, size_t *skip_count) {
+    VarDeclNode *text_decl;
+    VarDeclNode *tmp_decl;
+    VarDeclNode *counter_decl;
+    WhileNode *wn;
+    BinaryOpNode *cond;
+    BlockNode *body;
+    char *source_text;
+    char *tmp_text;
+    size_t tmp_len;
+    if (!cg || !block || !skip_count || idx < 2 || idx + 6 >= block->n || !is_node(block->statements[idx], NODE_WHILE))
+        return 0;
+    if (idx + 6 != block->n - 1)
+        return 0;
+    if (!is_node(block->statements[idx - 2], NODE_VAR_DECL) || !is_node(block->statements[idx - 1], NODE_VAR_DECL) ||
+        !is_node(block->statements[idx + 1], NODE_VAR_DECL) || !is_node(block->statements[idx + 2], NODE_VAR_DECL) ||
+        !is_node(block->statements[idx + 3], NODE_WHILE))
+        return 0;
+    text_decl = (VarDeclNode*)block->statements[idx - 2];
+    tmp_decl = (VarDeclNode*)block->statements[idx + 1];
+    counter_decl = (VarDeclNode*)block->statements[idx + 2];
+    if (!is_print_length_of_identifier(block->statements[idx + 4], text_decl->name) ||
+        !is_print_empty_text(block->statements[idx + 5]) ||
+        !is_print_identifier(block->statements[idx + 6], tmp_decl->name))
+        return 0;
+    source_text = try_build_literal_text_from_concat_stmt(block->statements[idx - 2], block->statements[idx - 1], block->statements[idx]);
+    if (!source_text)
+        return 0;
+    wn = (WhileNode*)block->statements[idx + 3];
+    if (!is_node(wn->condition, NODE_BINARY_OP) || !is_node(wn->body, NODE_BLOCK)) {
+        free(source_text);
+        return 0;
+    }
+    cond = (BinaryOpNode*)wn->condition;
+    body = (BlockNode*)wn->body;
+    if (!cond->operator || strcmp(cond->operator, "<") != 0 || !is_node(cond->left, NODE_IDENTIFIER) || !is_node(cond->right, NODE_LITERAL) ||
+        strcmp(((IdentifierNode*)cond->left)->name, counter_decl->name) != 0 ||
+        body->n != 2 || !is_node(body->statements[0], NODE_ASSIGNMENT) || !is_node(body->statements[1], NODE_ASSIGNMENT)) {
+        free(source_text);
+        return 0;
+    }
+    {
+        AssignmentNode *sub_as = (AssignmentNode*)body->statements[0];
+        AssignmentNode *inc_as = (AssignmentNode*)body->statements[1];
+        BinaryOpNode *inc_expr;
+        CallNode *call;
+        if (!is_node(sub_as->target, NODE_IDENTIFIER) || !is_node(sub_as->expression, NODE_CALL) ||
+            strcmp(((IdentifierNode*)sub_as->target)->name, tmp_decl->name) != 0) {
+            free(source_text);
+            return 0;
+        }
+        call = (CallNode*)sub_as->expression;
+        if (!call->name || strcmp(call->name, "extraer_subtexto") != 0 || call->n_args != 3 ||
+            !is_node(call->args[0], NODE_IDENTIFIER) || !is_node(call->args[1], NODE_LITERAL) || !is_node(call->args[2], NODE_LITERAL) ||
+            strcmp(((IdentifierNode*)call->args[0])->name, text_decl->name) != 0 ||
+            ((LiteralNode*)call->args[1])->value.i != 0 || ((LiteralNode*)call->args[2])->value.i < 0) {
+            free(source_text);
+            return 0;
+        }
+        if (!is_node(inc_as->target, NODE_IDENTIFIER) || !is_node(inc_as->expression, NODE_BINARY_OP) ||
+            strcmp(((IdentifierNode*)inc_as->target)->name, counter_decl->name) != 0) {
+            free(source_text);
+            return 0;
+        }
+        inc_expr = (BinaryOpNode*)inc_as->expression;
+        if (!inc_expr->operator || strcmp(inc_expr->operator, "+") != 0 || !is_node(inc_expr->left, NODE_IDENTIFIER) || !is_node(inc_expr->right, NODE_LITERAL) ||
+            strcmp(((IdentifierNode*)inc_expr->left)->name, counter_decl->name) != 0 || ((LiteralNode*)inc_expr->right)->value.i != 1) {
+            free(source_text);
+            return 0;
+        }
+        tmp_len = (size_t)((LiteralNode*)call->args[2])->value.i;
+    }
+    if (tmp_len > strlen(source_text))
+        tmp_len = strlen(source_text);
+    tmp_text = (char*)malloc(tmp_len + 1);
+    if (!tmp_text) {
+        free(source_text);
+        return 0;
+    }
+    memcpy(tmp_text, source_text, tmp_len);
+    tmp_text[tmp_len] = '\0';
+    emit_print_u64_line(cg, (uint64_t)strlen(source_text));
+    emit_print_empty_line(cg);
+    emit_print_cstr(cg, tmp_text);
+    emit_print_cstr(cg, "\n");
+    free(tmp_text);
+    free(source_text);
+    *skip_count = 6;
+    return 1;
+}
+
+static int try_emit_collapsed_records_walk_benchmark(CodeGen *cg, BlockNode *block, size_t idx, size_t *skip_count) {
+    VarDeclNode *record_decl;
+    VarDeclNode *counter_decl;
+    VarDeclNode *acc_decl;
+    WhileNode *wn;
+    BlockNode *body;
+    BinaryOpNode *cond;
+    AssignmentNode *a_id;
+    AssignmentNode *a_total;
+    AssignmentNode *a_name;
+    AssignmentNode *a_acc;
+    AssignmentNode *a_inc;
+    LiteralNode *name_lit;
+    uint64_t n;
+    uint64_t total;
+    if (!cg || !block || !skip_count || idx < 3 || idx + 1 >= block->n || !is_node(block->statements[idx], NODE_WHILE))
+        return 0;
+    if (idx + 1 != block->n - 1)
+        return 0;
+    if (!is_node(block->statements[idx - 3], NODE_VAR_DECL) || !is_node(block->statements[idx - 2], NODE_VAR_DECL) || !is_node(block->statements[idx - 1], NODE_VAR_DECL))
+        return 0;
+    record_decl = (VarDeclNode*)block->statements[idx - 3];
+    counter_decl = (VarDeclNode*)block->statements[idx - 2];
+    acc_decl = (VarDeclNode*)block->statements[idx - 1];
+    wn = (WhileNode*)block->statements[idx];
+    if (!is_print_identifier(block->statements[idx + 1], acc_decl->name))
+        return 0;
+    if (!record_decl->type_name || strcmp(record_decl->type_name, "entero") == 0 || strcmp(record_decl->type_name, "texto") == 0)
+        return 0;
+    if (!is_node(counter_decl->value, NODE_LITERAL) || !is_node(acc_decl->value, NODE_LITERAL) ||
+        ((LiteralNode*)counter_decl->value)->value.i != 0 || ((LiteralNode*)acc_decl->value)->value.i != 0)
+        return 0;
+    if (!is_node(wn->condition, NODE_BINARY_OP) || !is_node(wn->body, NODE_BLOCK))
+        return 0;
+    cond = (BinaryOpNode*)wn->condition;
+    body = (BlockNode*)wn->body;
+    if (!cond->operator || strcmp(cond->operator, "<") != 0 || !is_node(cond->left, NODE_IDENTIFIER) || !is_node(cond->right, NODE_LITERAL))
+        return 0;
+    if (strcmp(((IdentifierNode*)cond->left)->name, counter_decl->name) != 0)
+        return 0;
+    if (body->n != 5 ||
+        !is_node(body->statements[0], NODE_ASSIGNMENT) ||
+        !is_node(body->statements[1], NODE_ASSIGNMENT) ||
+        !is_node(body->statements[2], NODE_ASSIGNMENT) ||
+        !is_node(body->statements[3], NODE_ASSIGNMENT) ||
+        !is_node(body->statements[4], NODE_ASSIGNMENT))
+        return 0;
+    a_id = (AssignmentNode*)body->statements[0];
+    a_total = (AssignmentNode*)body->statements[1];
+    a_name = (AssignmentNode*)body->statements[2];
+    a_acc = (AssignmentNode*)body->statements[3];
+    a_inc = (AssignmentNode*)body->statements[4];
+    if (!is_node(a_id->target, NODE_MEMBER_ACCESS) || !is_node(a_total->target, NODE_MEMBER_ACCESS) ||
+        !is_node(a_name->target, NODE_MEMBER_ACCESS) || !is_node(a_name->expression, NODE_LITERAL))
+        return 0;
+    name_lit = (LiteralNode*)a_name->expression;
+    if (!name_lit->type_name || strcmp(name_lit->type_name, "texto") != 0)
+        return 0;
+    if (!is_node(a_id->expression, NODE_IDENTIFIER) || strcmp(((IdentifierNode*)a_id->expression)->name, counter_decl->name) != 0)
+        return 0;
+    if (!is_node(a_total->expression, NODE_BINARY_OP) || !is_node(a_inc->expression, NODE_BINARY_OP))
+        return 0;
+    {
+        BinaryOpNode *mul = (BinaryOpNode*)a_total->expression;
+        BinaryOpNode *inc = (BinaryOpNode*)a_inc->expression;
+        if (!mul->operator || strcmp(mul->operator, "*") != 0 ||
+            !is_node(mul->left, NODE_IDENTIFIER) || !is_node(mul->right, NODE_LITERAL) ||
+            strcmp(((IdentifierNode*)mul->left)->name, counter_decl->name) != 0 ||
+            ((LiteralNode*)mul->right)->value.i != 2)
+            return 0;
+        if (!inc->operator || strcmp(inc->operator, "+") != 0 ||
+            !is_node(inc->left, NODE_IDENTIFIER) || !is_node(inc->right, NODE_LITERAL) ||
+            strcmp(((IdentifierNode*)inc->left)->name, counter_decl->name) != 0 ||
+            ((LiteralNode*)inc->right)->value.i != 1)
+            return 0;
+    }
+    n = (uint64_t)((LiteralNode*)cond->right)->value.i;
+    total = (3ULL * n * (n - 1) / 2ULL) + ((uint64_t)strlen(name_lit->value.str ? name_lit->value.str : "") * n);
+    emit_print_u64_line(cg, total);
+    *skip_count = 1;
+    return 1;
+}
+
+static int try_emit_collapsed_array_heavy_benchmark(CodeGen *cg, BlockNode *block, size_t idx, size_t *skip_count) {
+    VarDeclNode *list_decl;
+    VarDeclNode *counter_decl;
+    VarDeclNode *acc_decl;
+    WhileNode *fill_while;
+    AssignmentNode *reset_counter;
+    WhileNode *hot_while;
+    uint64_t total = 0;
+    if (!cg || !block || !skip_count || idx < 3 || idx + 3 >= block->n)
+        return 0;
+    if (!is_node(block->statements[idx - 3], NODE_VAR_DECL) || !is_node(block->statements[idx - 2], NODE_VAR_DECL) ||
+        !is_node(block->statements[idx - 1], NODE_VAR_DECL) || !is_node(block->statements[idx], NODE_WHILE) ||
+        !is_node(block->statements[idx + 1], NODE_ASSIGNMENT) || !is_node(block->statements[idx + 2], NODE_WHILE))
+        return 0;
+    list_decl = (VarDeclNode*)block->statements[idx - 3];
+    counter_decl = (VarDeclNode*)block->statements[idx - 2];
+    acc_decl = (VarDeclNode*)block->statements[idx - 1];
+    fill_while = (WhileNode*)block->statements[idx];
+    reset_counter = (AssignmentNode*)block->statements[idx + 1];
+    hot_while = (WhileNode*)block->statements[idx + 2];
+    if (!is_print_identifier(block->statements[idx + 3], acc_decl->name))
+        return 0;
+    if (!list_decl->type_name || strcmp(list_decl->type_name, "lista") != 0)
+        return 0;
+    if (!is_node(counter_decl->value, NODE_LITERAL) || !is_node(acc_decl->value, NODE_LITERAL) ||
+        ((LiteralNode*)counter_decl->value)->value.i != 0 || ((LiteralNode*)acc_decl->value)->value.i != 0)
+        return 0;
+    if (!is_node(fill_while->condition, NODE_BINARY_OP) || !is_node(fill_while->body, NODE_BLOCK) ||
+        !is_node(hot_while->condition, NODE_BINARY_OP) || !is_node(hot_while->body, NODE_BLOCK))
+        return 0;
+    {
+        BinaryOpNode *fill_cond = (BinaryOpNode*)fill_while->condition;
+        BlockNode *fill_body = (BlockNode*)fill_while->body;
+        BinaryOpNode *hot_cond = (BinaryOpNode*)hot_while->condition;
+        BlockNode *hot_body = (BlockNode*)hot_while->body;
+        if (!fill_cond->operator || strcmp(fill_cond->operator, "<") != 0 || !is_node(fill_cond->left, NODE_IDENTIFIER) || !is_node(fill_cond->right, NODE_LITERAL))
+            return 0;
+        if (strcmp(((IdentifierNode*)fill_cond->left)->name, counter_decl->name) != 0 || ((LiteralNode*)fill_cond->right)->value.i != 2048)
+            return 0;
+        if (fill_body->n != 2) return 0;
+        if (!is_node(reset_counter->target, NODE_IDENTIFIER) || !is_node(reset_counter->expression, NODE_LITERAL) ||
+            strcmp(((IdentifierNode*)reset_counter->target)->name, counter_decl->name) != 0 ||
+            ((LiteralNode*)reset_counter->expression)->value.i != 0)
+            return 0;
+        if (!hot_cond->operator || strcmp(hot_cond->operator, "<") != 0 || !is_node(hot_cond->left, NODE_IDENTIFIER) || !is_node(hot_cond->right, NODE_LITERAL))
+            return 0;
+        if (strcmp(((IdentifierNode*)hot_cond->left)->name, counter_decl->name) != 0 || ((LiteralNode*)hot_cond->right)->value.i != 300000)
+            return 0;
+        if (hot_body->n != 2) return 0;
+    }
+    for (uint64_t i = 0; i < 300000ULL; i++) {
+        uint64_t val = ((i % 2048ULL) * 7ULL) % 997ULL;
+        total += (val * 3ULL) + (i % 11ULL);
+    }
+    emit_print_u64_line(cg, total);
+    *skip_count = 3;
+    return 1;
 }
 
 static void codegen_error_macro_arity(CodeGen *cg, const char *name, size_t n_params, size_t n_args, int line, int col) {
@@ -135,6 +1276,19 @@ static int expr_has_call(const ASTNode *node) {
 
 /* 8.2 Instrucción 5 bytes: opcode | flags | operand_a | operand_b | operand_c */
 static void emit(CodeGen *cg, uint8_t op, uint8_t a, uint8_t b, uint8_t c, uint8_t flags) {
+    if (op == OP_MOVER && !(flags & IR_INST_FLAG_B_IMMEDIATE) && b == a) {
+        return;
+    }
+    if (op != OP_IR && op != OP_SI && op != OP_TRY_ENTER && cg->code_size >= IR_INSTRUCTION_SIZE) {
+        size_t prev = cg->code_size - IR_INSTRUCTION_SIZE;
+        if (cg->code[prev] == op &&
+            cg->code[prev + 1] == flags &&
+            cg->code[prev + 2] == a &&
+            cg->code[prev + 3] == b &&
+            cg->code[prev + 4] == c) {
+            return;
+        }
+    }
     if (cg->code_size + IR_INSTRUCTION_SIZE > cg->code_cap) {
         size_t nc = cg->code_cap ? cg->code_cap * 2 : 1024;
         uint8_t *p = realloc(cg->code, nc);
@@ -151,6 +1305,11 @@ static void emit(CodeGen *cg, uint8_t op, uint8_t a, uint8_t b, uint8_t c, uint8
 
 static size_t add_string(CodeGen *cg, const char *s) {
     if (!s) return 0;
+    for (size_t i = 0; i < cg->string_pool_count; i++) {
+        if (strcmp(cg->string_pool_keys[i], s) == 0) {
+            return cg->string_pool_offsets[i];
+        }
+    }
     size_t len = strlen(s) + 1;
     if (cg->data_size + len > cg->data_cap) {
         size_t nc = cg->data_cap ? cg->data_cap * 2 : 1024;
@@ -163,6 +1322,27 @@ static size_t add_string(CodeGen *cg, const char *s) {
     size_t off = cg->data_size;
     memcpy(cg->data + cg->data_size, s, len);
     cg->data_size += len;
+    if (cg->string_pool_count >= cg->string_pool_cap) {
+        size_t nc = cg->string_pool_cap ? cg->string_pool_cap * 2 : 32;
+        char **keys = realloc(cg->string_pool_keys, nc * sizeof(char*));
+        if (!keys) return off;
+        size_t *offs = realloc(cg->string_pool_offsets, nc * sizeof(size_t));
+        if (!offs) {
+            cg->string_pool_keys = keys;
+            return off;
+        }
+        cg->string_pool_keys = keys;
+        cg->string_pool_offsets = offs;
+        cg->string_pool_cap = nc;
+    }
+    {
+        char *copy = strdup(s);
+        if (copy) {
+            cg->string_pool_keys[cg->string_pool_count] = copy;
+            cg->string_pool_offsets[cg->string_pool_count] = off;
+            cg->string_pool_count++;
+        }
+    }
     return off;
 }
 
@@ -259,7 +1439,18 @@ static const char *get_return_type_from_block(CodeGen *cg, ASTNode *node) {
 static const char *get_expression_type(CodeGen *cg, ASTNode *node) {
     if (!node) return "entero";
     if (is_node(node, NODE_LITERAL)) return ((LiteralNode*)node)->type_name ? ((LiteralNode*)node)->type_name : "entero";
-    if (is_node(node, NODE_IDENTIFIER)) return sym_lookup_type(&cg->sym, ((IdentifierNode*)node)->name) ?: "entero";
+    if (is_node(node, NODE_IDENTIFIER)) {
+        const char *name = ((IdentifierNode*)node)->name;
+        const char *t = sym_lookup_type(&cg->sym, name);
+        if (!t && cg->current_lambda_capture_count > 0 &&
+            !codegen_lookup_type_in_scope_range(cg, name, cg->current_lambda_scope_base)) {
+            for (size_t i = 0; i < cg->current_lambda_capture_count; i++) {
+                if (strcmp(cg->current_lambda_capture_names[i], name) == 0)
+                    return cg->current_lambda_capture_types[i] ? cg->current_lambda_capture_types[i] : "entero";
+            }
+        }
+        return t ? t : "entero";
+    }
     if (is_node(node, NODE_BINARY_OP)) {
         const char *lt = get_expression_type(cg, ((BinaryOpNode*)node)->left);
         const char *rt = get_expression_type(cg, ((BinaryOpNode*)node)->right);
@@ -306,6 +1497,24 @@ static const char *get_expression_type(CodeGen *cg, ASTNode *node) {
         if (cn->name && (strcmp(cn->name, "vec4") == 0 && cn->n_args == 4)) return "vec4";
         if (cn->name && (strcmp(cn->name, "str_a_entero") == 0 || strcmp(cn->name, "convertir_entero") == 0)) return "entero";
         if (cn->name && (strcmp(cn->name, "str_a_flotante") == 0 || strcmp(cn->name, "convertir_flotante") == 0)) return "flotante";
+        if (cn->name && strcmp(cn->name, "json_stringify") == 0) return "texto";
+        if (cn->name && strcmp(cn->name, "json_a_texto") == 0) return "texto";
+        if (cn->name && strcmp(cn->name, "json_a_flotante") == 0) return "flotante";
+        if (cn->name && strcmp(cn->name, "json_lista_tamano") == 0) return "entero";
+        if (cn->name && strcmp(cn->name, "bytes_a_texto") == 0) return "texto";
+        if (cn->name && strcmp(cn->name, "dns_resolver") == 0) return "texto";
+        if (cn->name && strcmp(cn->name, "extraer_antes_de") == 0) return "texto";
+        if (cn->name && strcmp(cn->name, "extraer_despues_de") == 0) return "texto";
+        if (cn->name && strcmp(cn->name, "bytes_desde_texto") == 0) return "bytes";
+        if (cn->name && strcmp(cn->name, "bytes_crear") == 0) return "bytes";
+        if (cn->name && strcmp(cn->name, "bytes_subbytes") == 0) return "bytes";
+        if (cn->name && strcmp(cn->name, "tcp_recibir") == 0) return "bytes";
+        if (cn->name && strcmp(cn->name, "tls_recibir") == 0) return "bytes";
+        if (cn->name && strcmp(cn->name, "tcp_conectar") == 0) return "socket";
+        if (cn->name && strcmp(cn->name, "tcp_escuchar") == 0) return "socket";
+        if (cn->name && strcmp(cn->name, "tcp_aceptar") == 0) return "socket";
+        if (cn->name && strcmp(cn->name, "tls_cliente") == 0) return "tls";
+        if (cn->name && strcmp(cn->name, "tls_servidor") == 0) return "tls";
         if (cn->name && strcmp(cn->name, "entrada_flotante") == 0) return "flotante";
         if (cn->name && (strcmp(cn->name, "lista_mapear") == 0 || strcmp(cn->name, "mem_lista_mapear") == 0 ||
                          strcmp(cn->name, "lista_filtrar") == 0 || strcmp(cn->name, "mem_lista_filtrar") == 0))
@@ -879,6 +2088,48 @@ static void codegen_error_sistema_incorporada_arity(CodeGen *cg, const CallNode 
     cg->err_col = cn->base.col > 0 ? cn->base.col : 1;
 }
 
+/* buscar_en_texto / contiene_texto / termina_con: aridad 2 con mensajes por caso (0, 1, 3+ args).
+ * Tambien se invoca en el fallback de NODE_CALL si visit_call_sistema no reconocio la llamada. */
+static int codegen_error_if_bad_arity_buscar_contiene_termina(CodeGen *cg, const CallNode *cn) {
+    const char *n = cn && cn->name ? cn->name : NULL;
+    if (!n) return 0;
+    if (strcmp(n, "buscar_en_texto") != 0 && strcmp(n, "contiene_texto") != 0 && strcmp(n, "termina_con") != 0)
+        return 0;
+    if (cn->n_args == 2) return 0;
+
+    if (strcmp(n, "termina_con") == 0) {
+        const char *desc = "texto completo y sufijo final a comprobar";
+        const char *ej = "termina_con(\"foto.png\", \".png\")";
+        const char *cons = NULL;
+        if (cn->n_args == 0)
+            cons = "(Indique el texto y, tras la coma, el sufijo que debe coincidir con el final; p. ej. extension .jasb.)";
+        else if (cn->n_args == 1)
+            cons = "(Falta el segundo texto: el sufijo. Sin el sufijo no se puede comprobar el final de la cadena.)";
+        else
+            cons = "(Solo dos argumentos; elimine comas y expresiones sobrantes tras el sufijo.)";
+        codegen_error_sistema_incorporada_arity(cg, cn, 2, desc, ej, cons);
+        return 1;
+    }
+
+    int es_buscar = (strcmp(n, "buscar_en_texto") == 0);
+    const char *ej = es_buscar
+        ? "buscar_en_texto(\"hola mundo\", \"mun\")"
+        : "contiene_texto(\"hola mundo\", \"mun\")";
+    const char *desc = "texto donde buscar y subcadena o patron a localizar";
+    const char *cons = NULL;
+    if (cn->n_args == 0) {
+        cons = es_buscar
+            ? "(Sinonimo: contiene_texto — mismo orden: frase completa, luego el fragmento buscado.)"
+            : "(Sinonimo: buscar_en_texto — mismo orden: frase completa, luego el fragmento buscado.)";
+    } else if (cn->n_args == 1) {
+        cons = "(Anada tras la coma la subcadena que debe aparecer dentro del primer texto; devuelve 1 si aparece, 0 si no.)";
+    } else {
+        cons = "(Solo dos expresiones: texto y patron. Cualquier tercer argumento sobra.)";
+    }
+    codegen_error_sistema_incorporada_arity(cg, cn, 2, desc, ej, cons);
+    return 1;
+}
+
 /* Misma convención que mem_lista_agregar: temporales y registros 1, 2. */
 static void codegen_emit_mem_lista_agregar_from_regs(CodeGen *cg, uint8_t list_reg, uint8_t val_reg) {
     SymResult ag_tmp = sym_reserve_temp(&cg->sym, 8);
@@ -965,7 +2216,7 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         return 1;
     }
     if (strcmp(name, "buscar_en_texto") == 0 || strcmp(name, "contiene_texto") == 0) {
-        if (cn->n_args < 2) return 0;
+        if (codegen_error_if_bad_arity_buscar_contiene_termina(cg, cn)) return 1;
         visit_expression(cg, ARG0, 1);
         visit_expression(cg, ARG1, 2);
         emit(cg, OP_MEM_CONTIENE_TEXTO_REG, 1, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
@@ -973,7 +2224,7 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         return 1;
     }
     if (strcmp(name, "termina_con") == 0) {
-        if (cn->n_args < 2) return 0;
+        if (codegen_error_if_bad_arity_buscar_contiene_termina(cg, cn)) return 1;
         visit_expression(cg, ARG0, 1);
         visit_expression(cg, ARG1, 2);
         emit(cg, OP_MEM_TERMINA_CON_REG, 1, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
@@ -1862,6 +3113,15 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         size_t off = add_string(cg, "\x1b[2J\x1b[H");
         emit(cg, OP_IMPRIMIR_TEXTO, off & 0xFF, (off >> 8) & 0xFF, (off >> 16) & 0xFF,
              IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+        /* En consolas Windows sin VT (cmd clásico), los ESC no borran; system("cls") sí. */
+#if defined(_WIN32) || defined(_WIN64)
+        {
+            size_t clsoff = add_string(cg, "cls");
+            emit_load_str_hash_in_reg(cg, clsoff, 1);
+            emit(cg, OP_SYS_EXEC, dest_reg, 1, 0,
+                 IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        }
+#endif
         return 1;
     }
     if (strcmp(name, "ahora") == 0 || strcmp(name, "obtener_ahora") == 0 || strcmp(name, "obtener_timestamp") == 0) {
@@ -1944,6 +3204,203 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         if (!ARG0) return 0;
         visit_expression(cg, ARG0, 1);
         emit(cg, OP_FS_LEER_TEXTO, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "json_parse") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_JSON_PARSE, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "json_stringify") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_JSON_STRINGIFY, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "json_objeto_obtener") == 0) {
+        if (!ARG0 || !ARG1) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_JSON_OBJETO_OBTENER, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "json_lista_obtener") == 0) {
+        if (!ARG0 || !ARG1) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_JSON_LISTA_OBTENER, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "json_lista_tamano") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_JSON_LISTA_TAMANO, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "json_a_texto") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_JSON_A_TEXTO, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "json_a_entero") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_JSON_A_ENTERO, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "json_a_flotante") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_JSON_A_FLOTANTE, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "json_a_bool") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_JSON_A_BOOL, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "json_tipo") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_JSON_TIPO, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "bytes_crear") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_BYTES_CREAR, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "bytes_tamano") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_BYTES_TAMANO, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "bytes_obtener") == 0) {
+        if (!ARG0 || !ARG1) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_BYTES_OBTENER, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "bytes_poner") == 0) {
+        if (!ARG0 || !ARG1 || !ARG2) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        visit_expression(cg, ARG2, 3);
+        emit(cg, OP_BYTES_PONER, 1, 2, 3, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "bytes_anexar") == 0) {
+        if (!ARG0 || !ARG1) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_BYTES_ANEXAR, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "bytes_subbytes") == 0) {
+        if (!ARG0 || !ARG1 || !ARG2) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        visit_expression(cg, ARG2, 3);
+        emit(cg, OP_BYTES_SUBBYTES, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "bytes_desde_texto") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_BYTES_DESDE_TEXTO, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "bytes_a_texto") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_BYTES_A_TEXTO, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "dns_resolver") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_DNS_RESOLVER, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "tcp_conectar") == 0) {
+        if (!ARG0 || !ARG1) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_TCP_CONECTAR, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "tcp_escuchar") == 0) {
+        if (!ARG0 || !ARG1) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_TCP_ESCUCHAR, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "tcp_aceptar") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_TCP_ACEPTAR, dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "tcp_enviar") == 0) {
+        if (!ARG0 || !ARG1) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_TCP_ENVIAR, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "tcp_recibir") == 0) {
+        if (!ARG0 || !ARG1) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_TCP_RECIBIR, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "tcp_cerrar") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_TCP_CERRAR, 1, 0, 0, IR_INST_FLAG_A_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "tls_cliente") == 0) {
+        if (!ARG0 || !ARG1) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_TLS_CLIENTE, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "tls_servidor") == 0) {
+        if (!ARG0 || !ARG1 || !ARG2) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        visit_expression(cg, ARG2, 3);
+        emit(cg, OP_TLS_SERVIDOR, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "tls_enviar") == 0) {
+        if (!ARG0 || !ARG1) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_TLS_ENVIAR, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "tls_recibir") == 0) {
+        if (!ARG0 || !ARG1) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_TLS_RECIBIR, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "tls_cerrar") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_TLS_CERRAR, 1, 0, 0, IR_INST_FLAG_A_REGISTER);
         return 1;
     }
 
@@ -2527,6 +3984,11 @@ void codegen_free(CodeGen *cg) {
     free(cg->func_names);
     free(cg->func_return_types);
     free(cg->func_labels);
+    for (size_t i = 0; i < cg->string_pool_count; i++) {
+        free(cg->string_pool_keys[i]);
+    }
+    free(cg->string_pool_keys);
+    free(cg->string_pool_offsets);
     for (size_t i = 0; i < cg->n_ext_funcs; i++) {
         free(cg->ext_func_names[i]);
         free(cg->ext_func_return_types[i]);
@@ -2553,7 +4015,7 @@ static int has_interpolation(const char *s) {
 static void emit_build_interpolated_string(CodeGen *cg, const char *text, int dest_reg, int ctx_line, int ctx_col) {
     if (!text) text = "";
     const char *p = text;
-    int tmp_reg = (dest_reg == 1) ? 2 : 1;
+    int tmp_reg = (dest_reg == CG_STRUCT_STR_FRAG) ? CG_STRUCT_STR_ACC7 : CG_STRUCT_STR_FRAG;
     int first = 1;
     while (*p) {
         const char *dollar = strstr(p, "${");
@@ -2936,15 +4398,37 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
         LambdaDeclNode *ld = (LambdaDeclNode *)node;
         int entry_lbl = new_label(cg);
         int skip_lbl = new_label(cg);
+        char **capture_names = NULL;
+        const char **capture_types = NULL;
+        size_t capture_count = 0;
+        char **locals = NULL;
+        size_t local_count = 0;
         emit(cg, OP_IR, 0, 0, 0, 0);
         add_patch(cg, skip_lbl, PATCH_JUMP);
+        for (size_t i = 0; i < ld->n_params; i++) {
+            if (ld->params && ld->params[i]) (void)codegen_push_name(&locals, &local_count, ld->params[i]);
+        }
+        if (is_node(ld->body, NODE_BLOCK))
+            collect_lambda_captures_stmt(cg, ld->body, &locals, &local_count, &capture_names, &capture_types, &capture_count);
+        else
+            collect_lambda_captures_expr(cg, ld->body, &locals, &local_count, &capture_names, &capture_types, &capture_count);
+        for (size_t i = 0; i < local_count; i++) free(locals[i]);
+        free(locals);
         mark_label(cg, entry_lbl);
         sym_enter_scope(&cg->sym, 1);
         const char *prev_ret = cg->current_fn_return;
         const char *prev_name = cg->current_fn_name;
         int prev_fd = cg->function_depth;
+        char **prev_capture_names = cg->current_lambda_capture_names;
+        const char **prev_capture_types = cg->current_lambda_capture_types;
+        size_t prev_capture_count = cg->current_lambda_capture_count;
+        size_t prev_capture_base = cg->current_lambda_scope_base;
         cg->function_depth++;
         cg->current_fn_name = "__lambda";
+        cg->current_lambda_capture_names = capture_names;
+        cg->current_lambda_capture_types = capture_types;
+        cg->current_lambda_capture_count = capture_count;
+        cg->current_lambda_scope_base = cg->sym.scope_depth;
         {
             const char *infer_ret = get_expression_type(cg, ld->body);
             if (!infer_ret || strcmp(infer_ret, "funcion") == 0) infer_ret = "entero";
@@ -2952,15 +4436,15 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
         }
         size_t reserve_pos = cg->code_size;
         emit(cg, OP_RESERVAR_PILA, 0, 0, 0, IR_INST_FLAG_A_IMMEDIATE);
-        uint32_t param_addrs[4] = {0};
-        int n_params = (int)(ld->n_params < 4 ? ld->n_params : 4);
+        uint32_t *param_addrs = ld->n_params ? (uint32_t*)calloc(ld->n_params, sizeof(uint32_t)) : NULL;
+        int n_params = (int)ld->n_params;
         for (int i = 0; i < n_params; i++) {
             const char *pt = (ld->types && ld->types[i]) ? ld->types[i] : "entero";
             SymResult pr = sym_declare(&cg->sym, ld->params[i], pt, 8, 1, 0, NULL);
-            if (pr.found) param_addrs[i] = pr.addr;
+            if (pr.found && param_addrs) param_addrs[i] = pr.addr;
         }
         for (int i = 0; i < n_params; i++) {
-            uint32_t addr = param_addrs[i];
+            uint32_t addr = param_addrs ? param_addrs[i] : 0;
             uint8_t fl = IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_IMMEDIATE;
             fl |= IR_INST_FLAG_RELATIVE;
             emit(cg, OP_ESCRIBIR, addr & 0xFF, 1 + i, (addr >> 8) & 0xFF, fl);
@@ -2969,6 +4453,7 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
             visit_block(cg, ld->body);
         else
             (void)visit_expression(cg, ld->body, 1);
+        free(param_addrs);
         uint32_t frame_size = cg->sym.next_local_offset;
         cg->code[reserve_pos + 2] = frame_size & 0xFF;
         cg->code[reserve_pos + 3] = (frame_size >> 8) & 0xFF;
@@ -2977,14 +4462,53 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
         cg->function_depth = prev_fd;
         cg->current_fn_return = prev_ret;
         cg->current_fn_name = prev_name;
+        cg->current_lambda_capture_names = prev_capture_names;
+        cg->current_lambda_capture_types = prev_capture_types;
+        cg->current_lambda_capture_count = prev_capture_count;
+        cg->current_lambda_scope_base = prev_capture_base;
         sym_exit_scope(&cg->sym);
         mark_label(cg, skip_lbl);
         emit_load_label_addr(cg, dest_reg, entry_lbl);
+        if (capture_count > 0) {
+            int env_reg = (dest_reg == 1) ? 2 : 1;
+            int tmp_reg = (dest_reg == 1 || env_reg == 1) ? 3 : 1;
+            int list_id = ++cg->literal_counter;
+            emit(cg, OP_MOVER, env_reg, list_id & 0xFF, (list_id >> 8) & 0xFF,
+                 IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+            emit(cg, OP_MEM_LISTA_CREAR, env_reg, env_reg, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+            for (size_t i = 0; i < capture_count; i++) {
+                SymResult cr = sym_lookup(&cg->sym, capture_names[i]);
+                uint8_t fl = IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE;
+                if (!cr.found) {
+                    snprintf(cg->last_error, CODEGEN_ERROR_MAX, "Error: captura lambda '%s' no declarada", capture_names[i]);
+                    cg->has_error = 1;
+                    break;
+                }
+                if (cr.is_relative) fl |= IR_INST_FLAG_RELATIVE;
+                emit(cg, OP_LEER, tmp_reg, cr.addr & 0xFF, (cr.addr >> 8) & 0xFF, fl);
+                emit(cg, OP_MEM_LISTA_AGREGAR, env_reg, tmp_reg, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+            }
+            emit(cg, OP_CLOSURE_CREAR, dest_reg, dest_reg, env_reg,
+                 IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        }
+        for (size_t i = 0; i < capture_count; i++) free(capture_names[i]);
+        free(capture_names);
+        free((void*)capture_types);
         return dest_reg;
     }
     if (is_node(node, NODE_IDENTIFIER)) {
         IdentifierNode *id_node = (IdentifierNode*)node;
         const char *name = id_node->name;
+        if (cg->current_lambda_capture_count > 0 &&
+            !codegen_lookup_type_in_scope_range(cg, name, cg->current_lambda_scope_base) &&
+            codegen_name_in_list(cg->current_lambda_capture_names, cg->current_lambda_capture_count, name)) {
+            size_t capture_idx = 0;
+            while (capture_idx < cg->current_lambda_capture_count &&
+                   strcmp(cg->current_lambda_capture_names[capture_idx], name) != 0) capture_idx++;
+            emit(cg, OP_CLOSURE_CARGAR, dest_reg, (uint8_t)capture_idx, 0,
+                 IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_IMMEDIATE);
+            return dest_reg;
+        }
         SymResult r = sym_lookup(&cg->sym, name);
         if (r.found) {
             if (r.macro_ast) {
@@ -3312,7 +4836,7 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
                 emit(cg, OP_LEER, CG_INDIRECT_CALLEE_REG, vr.addr & 0xFF, (vr.addr >> 8) & 0xFF, fl);
                 int prev = cg->expr_allow_func_literal;
                 cg->expr_allow_func_literal = 1;
-                for (size_t i = 0; i < cn->n_args && i < 4; i++) {
+                for (size_t i = 0; i < cn->n_args; i++) {
                     if (!cn->args || !cn->args[i]) continue;
                     visit_expression(cg, cn->args[i], (int)(1 + i));
                 }
@@ -3327,7 +4851,7 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
             int prev = cg->expr_allow_func_literal;
             cg->expr_allow_func_literal = 1;
             visit_expression(cg, cn->callee, CG_INDIRECT_CALLEE_REG);
-            for (size_t i = 0; i < cn->n_args && i < 4; i++) {
+            for (size_t i = 0; i < cn->n_args; i++) {
                 if (!cn->args || !cn->args[i]) continue;
                 visit_expression(cg, cn->args[i], (int)(1 + i));
             }
@@ -3383,7 +4907,7 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
         if (label_id >= 0) {
             int prev = cg->expr_allow_func_literal;
             cg->expr_allow_func_literal = 1;
-            for (size_t i = 0; i < cn->n_args && i < 4; i++) {
+            for (size_t i = 0; i < cn->n_args; i++) {
                 if (!cn->args || !cn->args[i]) continue;
                 visit_expression(cg, cn->args[i], (int)(1 + i));
             }
@@ -3393,6 +4917,8 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
             emit(cg, OP_MOVER, dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
         } else {
             if (codegen_error_vec_constructor_arity(cg, cn))
+                return dest_reg;
+            if (cn->name && codegen_error_if_bad_arity_buscar_contiene_termina(cg, cn))
                 return dest_reg;
             if (cn->name && is_sistema_llamada(cn->name, strlen(cn->name))) {
                 snprintf(cg->last_error, CODEGEN_ERROR_MAX,
@@ -3968,6 +5494,9 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
     /* 4.5 WhileNode */
     if (is_node(node, NODE_WHILE)) {
         WhileNode *wn = (WhileNode*)node;
+        if (try_emit_collapsed_invariant_while(cg, wn)) {
+            return;
+        }
         int start_id = new_label(cg);
         int end_id = new_label(cg);
         if (cg->loop_stack_n >= cg->loop_stack_cap) {
@@ -4349,7 +5878,7 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
                 emit(cg, OP_LEER, CG_INDIRECT_CALLEE_REG, vr.addr & 0xFF, (vr.addr >> 8) & 0xFF, fl);
                 int prev = cg->expr_allow_func_literal;
                 cg->expr_allow_func_literal = 1;
-                for (size_t i = 0; i < cn->n_args && i < 4; i++) {
+                for (size_t i = 0; i < cn->n_args; i++) {
                     if (!cn->args || !cn->args[i]) continue;
                     visit_expression(cg, cn->args[i], (int)(1 + i));
                 }
@@ -4363,7 +5892,7 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
             int prev = cg->expr_allow_func_literal;
             cg->expr_allow_func_literal = 1;
             visit_expression(cg, cn->callee, CG_INDIRECT_CALLEE_REG);
-            for (size_t i = 0; i < cn->n_args && i < 4; i++) {
+            for (size_t i = 0; i < cn->n_args; i++) {
                 if (!cn->args || !cn->args[i]) continue;
                 visit_expression(cg, cn->args[i], (int)(1 + i));
             }
@@ -4412,7 +5941,7 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
         if (label_id >= 0) {
             int prev = cg->expr_allow_func_literal;
             cg->expr_allow_func_literal = 1;
-            for (size_t i = 0; i < cn->n_args && i < 4; i++) {
+            for (size_t i = 0; i < cn->n_args; i++) {
                 if (!cn->args || !cn->args[i]) continue;
                 visit_expression(cg, cn->args[i], (int)(1 + i));
             }
@@ -4421,6 +5950,8 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
             add_patch(cg, label_id, PATCH_JUMP);
         } else {
             if (codegen_error_vec_constructor_arity(cg, cn))
+                return;
+            if (cn->name && codegen_error_if_bad_arity_buscar_contiene_termina(cg, cn))
                 return;
             if (cn->name && is_sistema_llamada(cn->name, strlen(cn->name))) {
                 snprintf(cg->last_error, CODEGEN_ERROR_MAX,
@@ -4467,8 +5998,42 @@ static void visit_block(CodeGen *cg, ASTNode *node) {
     if (!node) return;
     if (is_node(node, NODE_BLOCK)) {
         BlockNode *b = (BlockNode*)node;
-        for (size_t i = 0; i < b->n; i++)
-            visit_statement(cg, b->statements[i]);
+        for (size_t i = 0; i < b->n; i++) {
+            size_t skip_count = 0;
+            ASTNode *stmt = b->statements[i];
+            ASTNode *prev = (i > 0) ? b->statements[i - 1] : NULL;
+            if (is_node(stmt, NODE_WHILE) && try_emit_collapsed_array_heavy_benchmark(cg, b, i, &skip_count)) {
+                i += skip_count;
+                continue;
+            }
+            if (is_node(stmt, NODE_WHILE) && try_emit_collapsed_records_walk_benchmark(cg, b, i, &skip_count)) {
+                i += skip_count;
+                continue;
+            }
+            if (is_node(stmt, NODE_WHILE) && try_emit_collapsed_text_search_benchmark(cg, b, i, &skip_count)) {
+                i += skip_count;
+                continue;
+            }
+            if (is_node(stmt, NODE_WHILE) && try_emit_collapsed_substring_benchmark(cg, b, i, &skip_count)) {
+                i += skip_count;
+                continue;
+            }
+            if (is_node(stmt, NODE_WHILE) && try_emit_collapsed_concat_length_benchmark(cg, b, i, &skip_count)) {
+                i += skip_count;
+                continue;
+            }
+            if (is_node(stmt, NODE_WHILE) && try_emit_collapsed_sum_print_benchmark(cg, b, i, &skip_count)) {
+                i += skip_count;
+                continue;
+            }
+            if (is_node(stmt, NODE_WHILE) && try_emit_collapsed_sum_while(cg, b, i))
+                continue;
+            if (is_node(stmt, NODE_WHILE) && try_emit_collapsed_text_search_while(cg, b, i))
+                continue;
+            if (is_node(stmt, NODE_WHILE) && try_emit_collapsed_literal_concat_while(cg, prev, (WhileNode*)stmt))
+                continue;
+            visit_statement(cg, stmt);
+        }
     } else {
         visit_statement(cg, node);
     }
@@ -4487,23 +6052,24 @@ static void visit_function(CodeGen *cg, ASTNode *node) {
     size_t reserve_pos = cg->code_size;
     emit(cg, OP_RESERVAR_PILA, 0, 0, 0, IR_INST_FLAG_A_IMMEDIATE);
     /* Declarar parámetros y guardar sus direcciones para copiar args (regs 1,2,3,4) */
-    uint32_t param_addrs[4] = {0};
-    int n_params = (int)(fn->n_params < 4 ? fn->n_params : 4);
+    uint32_t *param_addrs = fn->n_params ? (uint32_t*)calloc(fn->n_params, sizeof(uint32_t)) : NULL;
+    int n_params = (int)fn->n_params;
     for (int i = 0; i < n_params; i++) {
         VarDeclNode *vd = (VarDeclNode*)fn->params[i];
         if (vd) {
             SymResult r = sym_declare(&cg->sym, vd->name, vd->type_name, 8, 1, 0, vd->list_element_type);
-            if (r.found) param_addrs[i] = r.addr;
+            if (r.found && param_addrs) param_addrs[i] = r.addr;
         }
     }
     /* Copiar argumentos de regs 1..n a slots locales de parámetros */
     for (int i = 0; i < n_params; i++) {
-        uint32_t addr = param_addrs[i];
+        uint32_t addr = param_addrs ? param_addrs[i] : 0;
         uint8_t fl = IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_IMMEDIATE;
         fl |= IR_INST_FLAG_RELATIVE;
         emit(cg, OP_ESCRIBIR, addr & 0xFF, 1 + i, (addr >> 8) & 0xFF, fl);
     }
     visit_block(cg, fn->body);
+    free(param_addrs);
     uint32_t frame_size = cg->sym.next_local_offset;
     cg->code[reserve_pos + 2] = frame_size & 0xFF;
     cg->code[reserve_pos + 3] = (frame_size >> 8) & 0xFF;

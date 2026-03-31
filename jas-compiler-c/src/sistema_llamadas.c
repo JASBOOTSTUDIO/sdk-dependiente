@@ -7,7 +7,7 @@ const char *const SISTEMA_LLAMADAS[] = {
     "fin_archivo", "existe_archivo", "obtener_todos_conceptos", "obtener_relacionados",
     "lista_tamano", "lista_obtener", "obtener_timestamp", "aprender_peso", "procesar_texto",
     "str_minusculas", "str_copiar", "copiar_texto", "lista_agregar", "crear_lista", "obtener_nombre_concepto",
-    "listar_archivos", "finalizar", "olvidar", "obtener_campo", "bit_shl", "bit_shr",
+    "listar_archivos", "fs_listar", "finalizar", "olvidar", "obtener_campo", "bit_shl", "bit_shr",
     "sistema_ejecutar", "mapa_crear", "mapa_poner", "mapa_obtener",
     "str_a_entero", "str_a_flotante", "convertir_entero", "convertir_flotante", "fs_abrir", "fs_cerrar", "fs_escribir", "fs_leer_linea",
     "fs_leer_byte", "fs_escribir_byte", "fs_leer_texto", "sys_argc", "sys_argv", "str_extraer_caracter", "str_desde_numero", "decimal", "codigo_caracter", "caracter_a_texto",
@@ -56,7 +56,13 @@ const char *const SISTEMA_LLAMADAS[] = {
     "mat4_mul_vec4", "mat4_mul",
     "mat4_identidad", "mat4_transpuesta", "mat4_inversa",
     "mat3_mul_vec3", "mat3_mul",
-    "ffi_cargar", "ffi_simbolo", "ffi_llamar"
+    "ffi_cargar", "ffi_simbolo", "ffi_llamar",
+    "json_parse", "json_stringify", "json_objeto_obtener", "json_lista_obtener", "json_lista_tamano",
+    "json_a_texto", "json_a_entero", "json_a_flotante", "json_a_bool", "json_tipo",
+    "bytes_crear", "bytes_tamano", "bytes_obtener", "bytes_poner", "bytes_anexar", "bytes_subbytes",
+    "bytes_desde_texto", "bytes_a_texto", "dns_resolver",
+    "tcp_conectar", "tcp_escuchar", "tcp_aceptar", "tcp_enviar", "tcp_recibir", "tcp_cerrar",
+    "tls_cliente", "tls_servidor", "tls_enviar", "tls_recibir", "tls_cerrar"
 };
 const size_t SISTEMA_LLAMADAS_COUNT = sizeof(SISTEMA_LLAMADAS) / sizeof(SISTEMA_LLAMADAS[0]);
 

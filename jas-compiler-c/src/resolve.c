@@ -15,6 +15,9 @@ static size_t type_size(SymbolTable *st, const char *type_name) {
     if (strcmp(type_name, "u32") == 0 || strcmp(type_name, "u8") == 0 || strcmp(type_name, "byte") == 0) return 8;
     if (strcmp(type_name, "texto") == 0 || strcmp(type_name, "lista") == 0 || strcmp(type_name, "mapa") == 0)
         return 8;
+    if (strcmp(type_name, "bytes") == 0 || strcmp(type_name, "socket") == 0 || strcmp(type_name, "tls") == 0 ||
+        strcmp(type_name, "http_solicitud") == 0 || strcmp(type_name, "http_respuesta") == 0 || strcmp(type_name, "http_servidor") == 0)
+        return 8;
     if (strcmp(type_name, "vec2") == 0) return 16;
     if (strcmp(type_name, "vec3") == 0) return 24;
     if (strcmp(type_name, "vec4") == 0) return 32;

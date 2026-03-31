@@ -212,6 +212,9 @@ static size_t get_field_size(SymbolTable *st, const char *type_name) {
     if (strcmp(type_name, "mat3") == 0) return 72;   /* 9 x 8 bytes, row-major */
     if (strcmp(type_name, "lista") == 0 || strcmp(type_name, "mapa") == 0) return 8;
     if (strcmp(type_name, "funcion") == 0) return 8;  /* puntero de codigo (desplazamiento IR) */
+    if (strcmp(type_name, "bytes") == 0 || strcmp(type_name, "socket") == 0 || strcmp(type_name, "tls") == 0 ||
+        strcmp(type_name, "http_solicitud") == 0 || strcmp(type_name, "http_respuesta") == 0 || strcmp(type_name, "http_servidor") == 0)
+        return 8;
     return 8;  /* entero, u64, bool, etc. */
 }
 
