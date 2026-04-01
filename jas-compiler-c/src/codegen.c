@@ -102,6 +102,7 @@ static int new_label(CodeGen *cg);
 static void mark_label(CodeGen *cg, int id);
 static void add_patch(CodeGen *cg, int label_id, int type);
 static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg);
+static void emit_call_args_preserved(CodeGen *cg, ASTNode **args, size_t n_args);
 static void visit_statement(CodeGen *cg, ASTNode *node);
 static size_t add_string(CodeGen *cg, const char *s);
 static int has_interpolation(const char *s);
@@ -2169,8 +2170,7 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
                 "concatenar(\"Hola\", \"Mundo\")", cons);
             return 1;
         }
-        visit_expression(cg, ARG0, 1);
-        visit_expression(cg, ARG1, 2);
+        emit_call_args_preserved(cg, cn->args, cn->n_args);
         emit(cg, OP_STR_CONCATENAR_REG, 1, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
         emit(cg, OP_MOVER, dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
         return 1;
@@ -4836,10 +4836,7 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
                 emit(cg, OP_LEER, CG_INDIRECT_CALLEE_REG, vr.addr & 0xFF, (vr.addr >> 8) & 0xFF, fl);
                 int prev = cg->expr_allow_func_literal;
                 cg->expr_allow_func_literal = 1;
-                for (size_t i = 0; i < cn->n_args; i++) {
-                    if (!cn->args || !cn->args[i]) continue;
-                    visit_expression(cg, cn->args[i], (int)(1 + i));
-                }
+                emit_call_args_preserved(cg, cn->args, cn->n_args);
                 cg->expr_allow_func_literal = prev;
                 emit(cg, OP_LLAMAR, CG_INDIRECT_CALLEE_REG, 0, 0, 0);
                 emit(cg, OP_MOVER, dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
@@ -4851,10 +4848,7 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
             int prev = cg->expr_allow_func_literal;
             cg->expr_allow_func_literal = 1;
             visit_expression(cg, cn->callee, CG_INDIRECT_CALLEE_REG);
-            for (size_t i = 0; i < cn->n_args; i++) {
-                if (!cn->args || !cn->args[i]) continue;
-                visit_expression(cg, cn->args[i], (int)(1 + i));
-            }
+            emit_call_args_preserved(cg, cn->args, cn->n_args);
             cg->expr_allow_func_literal = prev;
             emit(cg, OP_LLAMAR, CG_INDIRECT_CALLEE_REG, 0, 0, 0);
             emit(cg, OP_MOVER, dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
@@ -4907,10 +4901,7 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
         if (label_id >= 0) {
             int prev = cg->expr_allow_func_literal;
             cg->expr_allow_func_literal = 1;
-            for (size_t i = 0; i < cn->n_args; i++) {
-                if (!cn->args || !cn->args[i]) continue;
-                visit_expression(cg, cn->args[i], (int)(1 + i));
-            }
+            emit_call_args_preserved(cg, cn->args, cn->n_args);
             cg->expr_allow_func_literal = prev;
             emit(cg, OP_LLAMAR, 0, 0, 0, IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
             add_patch(cg, label_id, PATCH_JUMP);
@@ -6079,6 +6070,32 @@ static void visit_function(CodeGen *cg, ASTNode *node) {
     cg->current_fn_return = prev_ret;
     cg->current_fn_name = prev_name;
     sym_exit_scope(&cg->sym);
+}
+
+static void emit_call_args_preserved(CodeGen *cg, ASTNode **args, size_t n_args) {
+    SymResult *tmp_slots = n_args ? (SymResult*)calloc(n_args, sizeof(SymResult)) : NULL;
+    const int temp_reg = 120;
+    for (size_t i = 0; i < n_args; i++) {
+        if (!args || !args[i]) continue;
+        visit_expression(cg, args[i], temp_reg);
+        if (tmp_slots) {
+            tmp_slots[i] = sym_reserve_temp(&cg->sym, 8);
+            {
+                uint8_t fl = IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_IMMEDIATE;
+                if (tmp_slots[i].is_relative) fl |= IR_INST_FLAG_RELATIVE;
+                emit(cg, OP_ESCRIBIR, tmp_slots[i].addr & 0xFF, temp_reg, (tmp_slots[i].addr >> 8) & 0xFF, fl);
+            }
+        }
+    }
+    for (size_t i = 0; i < n_args; i++) {
+        if (!args || !args[i]) continue;
+        if (tmp_slots) {
+            uint8_t fl = IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE;
+            if (tmp_slots[i].is_relative) fl |= IR_INST_FLAG_RELATIVE;
+            emit(cg, OP_LEER, (uint8_t)(1 + i), tmp_slots[i].addr & 0xFF, (tmp_slots[i].addr >> 8) & 0xFF, fl);
+        }
+    }
+    free(tmp_slots);
 }
 
 uint8_t *codegen_generate(CodeGen *cg, ASTNode *ast, size_t *out_len) {
