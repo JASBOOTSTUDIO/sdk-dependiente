@@ -179,25 +179,11 @@ static int expect(Parser *p, TokenType tt, const char *val, const char *msg) {
     return 0;
 }
 
-static const char *tok_str(const Token *t) {
-    if (!t) return "EOF";
-    if (t->type == TOK_STRING || t->type == TOK_IDENTIFIER || t->type == TOK_KEYWORD || t->type == TOK_OPERATOR)
-        return t->value.str ? t->value.str : "";
-    if (t->type == TOK_NUMBER) {
-        static char buf[64];
-        if (t->is_float) snprintf(buf, sizeof buf, "%g", t->value.f);
-        else snprintf(buf, sizeof buf, "%lld", (long long)t->value.i);
-        return buf;
-    }
-    return "?";
-}
-
 static char *strdup_safe(const char *s) {
     return s ? strdup(s) : NULL;
 }
 
-/* Palabras que el lexer marca como TOK_KEYWORD pero se permiten como nombre de variable/identificador
-   por compatibilidad historica (p. ej. "a" en formulas) o constructores vec/mat. Las llamadas sistema
+/* por compatibilidad historica (p. ej. "a" en formulas) o constructores vec/mat. Las llamadas sistema
    se escriben como identificador-primario en parse_primary. */
 static int keyword_ok_as_user_identifier(const char *s) {
     if (!s) return 0;
@@ -413,9 +399,7 @@ static ASTNode *make_if_stmt(ASTNode *cond, ASTNode *body, ASTNode *else_body, i
 static ASTNode *make_var_decl_simple(const char *type_name, const char *name, ASTNode *value, int line, int col);
 static ASTNode *make_function_node_simple(const char *name, const char *return_type, ASTNode **params, size_t n_params, ASTNode *body, int line, int col);
 static ASTNode *make_concat_expr(ASTNode *left, ASTNode *right, int line, int col);
-static ASTNode *make_wrap_expr(const char *prefix, ASTNode *middle, const char *suffix, int line, int col);
 static const char *literal_text_value(ASTNode *node);
-static ASTNode *make_literal_fmt(const char *prefix, const char *middle, const char *suffix);
 static ASTNode *join_markup_exprs(ASTNode **exprs, size_t n, int line, int col);
 static ASTNode *make_route_match_expr(ASTNode *route_expr, int line, int col);
 static ASTNode *clone_expr_basic(const ASTNode *node);
@@ -423,12 +407,6 @@ static char *make_named_string(const char *a, const char *b, const char *c);
 static int ensure_estructura_runtime_imports(Parser *p, NodeVec *globals, int *imports_added, int line, int col);
 static int estructura_window_vec_push(EstructaWindowVec *v, EstructaWindowDef def);
 static void estructura_window_vec_free(EstructaWindowVec *v);
-
-static ASTNode *parse_args(Parser *p) {
-    /* Solo para parse_primary - retorna primer arg. Usamos parse_expression en bucle. */
-    (void)p;
-    return NULL;
-}
 
 static char *parse_estructura_name(Parser *p, const char *contexto) {
     const Token *t = peek(p, 0);
@@ -1547,31 +1525,11 @@ static ASTNode *make_concat_expr(ASTNode *left, ASTNode *right, int line, int co
     return make_call_named("concatenar", args, 2, line, col);
 }
 
-static ASTNode *make_wrap_expr(const char *prefix, ASTNode *middle, const char *suffix, int line, int col) {
-    ASTNode *left = make_concat_expr(make_literal_str(prefix), middle, line, col);
-    if (!left) return NULL;
-    return make_concat_expr(left, make_literal_str(suffix), line, col);
-}
-
 static const char *literal_text_value(ASTNode *node) {
     if (!node || node->type != NODE_LITERAL) return NULL;
     LiteralNode *lit = (LiteralNode *)node;
     if (!lit->type_name || strcmp(lit->type_name, "texto") != 0) return NULL;
     return lit->value.str ? lit->value.str : "";
-}
-
-static ASTNode *make_literal_fmt(const char *prefix, const char *middle, const char *suffix) {
-    size_t a = prefix ? strlen(prefix) : 0;
-    size_t b = middle ? strlen(middle) : 0;
-    size_t c = suffix ? strlen(suffix) : 0;
-    char *buf = calloc(a + b + c + 1, 1);
-    if (!buf) return NULL;
-    if (prefix) memcpy(buf, prefix, a);
-    if (middle) memcpy(buf + a, middle, b);
-    if (suffix) memcpy(buf + a + b, suffix, c);
-    ASTNode *out = make_literal_str(buf);
-    free(buf);
-    return out;
 }
 
 static ASTNode *join_markup_exprs(ASTNode **exprs, size_t n, int line, int col) {
@@ -3493,9 +3451,7 @@ static ASTNode *parse_statement(Parser *p) {
             if (p->last_error) return NULL;
 
             ASTNode *else_b = NULL;
-            int found_sino = 0;
             if (match(p, TOK_KEYWORD, "sino")) {
-                found_sino = 1;
                 if (peek(p, 0) && peek(p, 0)->value.str && 
                    (strcmp(peek(p, 0)->value.str, "si") == 0 || strcmp(peek(p, 0)->value.str, "cuando") == 0)) {
                     else_b = parse_statement(p);
@@ -4356,7 +4312,6 @@ static ASTNode *parse_function(Parser *p, int is_exported, int is_async) {
     
     // Check if we encountered an error while parsing the body and didn't find fin_funcion
     if (!match(p, TOK_KEYWORD, "fin_funcion")) {
-        const Token *err_t = peek(p, 0);
         if (p->source_path && p->source_path[0])
             set_error_at(p, func_tok ? func_tok->line : 0, func_tok ? func_tok->column : 0,
                       "Archivo %s, linea %d, columna %d: bloque de `funcion` sin cierre. Falta `fin_funcion`.",

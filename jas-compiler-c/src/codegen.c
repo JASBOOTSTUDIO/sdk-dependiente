@@ -1100,7 +1100,6 @@ static int try_emit_collapsed_records_walk_benchmark(CodeGen *cg, BlockNode *blo
     AssignmentNode *a_id;
     AssignmentNode *a_total;
     AssignmentNode *a_name;
-    AssignmentNode *a_acc;
     AssignmentNode *a_inc;
     LiteralNode *name_lit;
     uint64_t n;
@@ -1140,7 +1139,6 @@ static int try_emit_collapsed_records_walk_benchmark(CodeGen *cg, BlockNode *blo
     a_id = (AssignmentNode*)body->statements[0];
     a_total = (AssignmentNode*)body->statements[1];
     a_name = (AssignmentNode*)body->statements[2];
-    a_acc = (AssignmentNode*)body->statements[3];
     a_inc = (AssignmentNode*)body->statements[4];
     if (!is_node(a_id->target, NODE_MEMBER_ACCESS) || !is_node(a_total->target, NODE_MEMBER_ACCESS) ||
         !is_node(a_name->target, NODE_MEMBER_ACCESS) || !is_node(a_name->expression, NODE_LITERAL))

@@ -1880,20 +1880,6 @@ static VMTlsEntry* vm_tls_get(VM* vm, uint32_t handle) {
     return &vm->tls_entries[handle - 1];
 }
 
-static int vm_http_server_reserve(VM* vm, uint32_t needed) {
-    if (!vm) return 0;
-    if (needed <= vm->http_server_cap) return 1;
-    {
-        uint32_t cap = vm->http_server_cap ? vm->http_server_cap * 2u : 8u;
-        while (cap < needed) cap *= 2u;
-        VMHttpServerEntry* next = (VMHttpServerEntry*)realloc(vm->http_servers, cap * sizeof(VMHttpServerEntry));
-        if (!next) return 0;
-        memset(next + vm->http_server_cap, 0, (cap - vm->http_server_cap) * sizeof(VMHttpServerEntry));
-        vm->http_servers = next;
-        vm->http_server_cap = cap;
-    }
-    return 1;
-}
 
 typedef struct VMOpenSslApi {
     int loaded;
@@ -5024,7 +5010,8 @@ int vm_step(VM* vm) {
                         vm_leer_u32(vm->ir->data, vm->ir->header.data_size, off24, &id_a);
                         vm_leer_u32(vm->ir->data, vm->ir->header.data_size, off24 + 4, &id_b);
                         vm_leer_u32(vm->ir->data, vm->ir->header.data_size, off24 + 8, &f_bits);
-                        float fuerza = *(float*)&f_bits;
+                        float fuerza;
+                        memcpy(&fuerza, &f_bits, sizeof(fuerza));
                         // fprintf(stderr, "[VM_ASOCIAR] (off) id_a=%u id_b=%u fuerza=%.2f\n", id_a, id_b, fuerza);
                         JMNValor v_f; v_f.f = fuerza;
                         jmn_agregar_conexion(vm->mem_neuronal, id_a, id_b, v_f, 0);
@@ -5064,7 +5051,8 @@ int vm_step(VM* vm) {
                         vm_leer_u32(vm->ir->data, vm->ir->header.data_size, off24, &id_a);
                         vm_leer_u32(vm->ir->data, vm->ir->header.data_size, off24 + 4, &id_b);
                         vm_leer_u32(vm->ir->data, vm->ir->header.data_size, off24 + 8, &f_bits);
-                        float delta = *(float*)&f_bits;
+                        float delta;
+                        memcpy(&delta, &f_bits, sizeof(delta));
                         // fprintf(stderr, "[VM_PENALIZAR] (off) id_a=%u id_b=%u delta=%.2f\n", id_a, id_b, delta);
                         jmn_penalizar_asociacion(vm->mem_neuronal, id_a, id_b, delta);
                     }
@@ -5406,7 +5394,7 @@ int vm_step(VM* vm) {
                 return 0;
             }
             vm->registers[inst.operand_a] = 0;
-            *(float*)&vm->registers[inst.operand_a] = val;
+            memcpy(&vm->registers[inst.operand_a], &val, sizeof(val));
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
@@ -6139,7 +6127,7 @@ int vm_step(VM* vm) {
                 return 0;
             }
             vm->registers[inst.operand_a] = 0;
-            *(float*)&vm->registers[inst.operand_a] = fv;
+            memcpy(&vm->registers[inst.operand_a], &fv, sizeof(fv));
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
