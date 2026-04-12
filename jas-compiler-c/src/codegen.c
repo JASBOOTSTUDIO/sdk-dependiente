@@ -1279,16 +1279,8 @@ static void emit(CodeGen *cg, uint8_t op, uint8_t a, uint8_t b, uint8_t c, uint8
     if (op == OP_MOVER && !(flags & IR_INST_FLAG_B_IMMEDIATE) && b == a) {
         return;
     }
-    if (op != OP_IR && op != OP_SI && op != OP_TRY_ENTER && cg->code_size >= IR_INSTRUCTION_SIZE) {
-        size_t prev = cg->code_size - IR_INSTRUCTION_SIZE;
-        if (cg->code[prev] == op &&
-            cg->code[prev + 1] == flags &&
-            cg->code[prev + 2] == a &&
-            cg->code[prev + 3] == b &&
-            cg->code[prev + 4] == c) {
-            return;
-        }
-    }
+    /* No suprimir instrucciones repetidas consecutivas: p. ej. dos OP_NO seguidos
+     * (`no (a y b)` tras normalizar `y` con OP_NO) deben emitirse ambas. */
     if (cg->code_size + IR_INSTRUCTION_SIZE > cg->code_cap) {
         size_t nc = cg->code_cap ? cg->code_cap * 2 : 1024;
         uint8_t *p = realloc(cg->code, nc);
@@ -4940,39 +4932,39 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
             emit(cg, OP_LEER, rL, tmp.addr & 0xFF, (tmp.addr >> 8) & 0xFF, fl_r);
         } else if (strcmp(op, "y") == 0) {
             int end_label = new_label(cg);
-            rL = visit_expression(cg, bn->left, dest_reg);
+            visit_expression(cg, bn->left, dest_reg);
             if (cg->has_error) return dest_reg;
             
-            // Para 'y': si la izquierda es falsa (igual a 0), saltar al final
-            emit(cg, OP_CMP_EQ, dest_reg, rL, 0, IR_INST_FLAG_C_IMMEDIATE);
+            // Si la izquierda es falsa (0), el resultado ya es 0 en dest_reg, saltamos al final
+            int tmp_reg = (dest_reg == 1) ? 2 : 1;
+            emit(cg, OP_CMP_EQ, tmp_reg, dest_reg, 0, IR_INST_FLAG_C_IMMEDIATE);
+            emit(cg, OP_SI, tmp_reg, 0, 0, IR_INST_FLAG_A_REGISTER);
+            add_patch(cg, end_label, PATCH_SI);
             
+            visit_expression(cg, bn->right, dest_reg);
+            if (cg->has_error) return dest_reg;
+            
+            mark_label(cg, end_label);
+            // Convertir resultado a booleano (0 o 1)
+            emit(cg, OP_CMP_EQ, dest_reg, dest_reg, 0, IR_INST_FLAG_C_IMMEDIATE);
+            emit(cg, OP_NO, dest_reg, dest_reg, 0, 0);
+            return dest_reg;
+        } else if (strcmp(op, "o") == 0) {
+            int end_label = new_label(cg);
+            visit_expression(cg, bn->left, dest_reg);
+            if (cg->has_error) return dest_reg;
+            
+            // Si la izquierda es verdadera (no 0), saltamos al final
             emit(cg, OP_SI, dest_reg, 0, 0, IR_INST_FLAG_A_REGISTER);
             add_patch(cg, end_label, PATCH_SI);
             
-            int rR = visit_expression(cg, bn->right, dest_reg);
+            visit_expression(cg, bn->right, dest_reg);
             if (cg->has_error) return dest_reg;
-            
-            if (rR != dest_reg) {
-                emit(cg, OP_MOVER, dest_reg, rR, 0, IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_IMMEDIATE);
-            }
-            // Convertir resultado a booleano (0 o 1)
-            emit(cg, OP_CMP_EQ, dest_reg, dest_reg, 0, IR_INST_FLAG_C_IMMEDIATE);
-            emit(cg, OP_NO, dest_reg, dest_reg, 0, 0);  // Negar para obtener 0/1
             
             mark_label(cg, end_label);
-            return dest_reg;
-        } else if (strcmp(op, "o") == 0) {
-            // Implementación simple como operador bit a bit para evitar problemas de precedencia
-            // Esto funcionará para valores 0 y 1 (booleanos)
-            int rL = visit_expression(cg, bn->left, dest_reg);
-            if (cg->has_error) return dest_reg;
-            
-            int rR_reg = (dest_reg == 1) ? 2 : ((dest_reg == 2) ? 1 : 2);
-            int rR = visit_expression(cg, bn->right, rR_reg);
-            if (cg->has_error) return dest_reg;
-            
-            // OR bit a bit funciona para booleanos (0 y 1)
-            emit(cg, OP_O, dest_reg, rL, rR, 0);
+            // Convertir resultado a booleano (0 o 1)
+            emit(cg, OP_CMP_EQ, dest_reg, dest_reg, 0, IR_INST_FLAG_C_IMMEDIATE);
+            emit(cg, OP_NO, dest_reg, dest_reg, 0, 0);
             return dest_reg;
         } else {
             int left_has_call = expr_has_call(bn->left);

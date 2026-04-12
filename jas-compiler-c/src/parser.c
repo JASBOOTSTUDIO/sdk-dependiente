@@ -183,6 +183,22 @@ static char *strdup_safe(const char *s) {
     return s ? strdup(s) : NULL;
 }
 
+/* value.str solo es valido cuando el tipo de token almacena puntero en la union;
+ * para TOK_NUMBER/TOK_EOF/TOK_NEWLINE el lexer usa value.i/value.f y leer .str es UB. */
+static const char *token_union_str(const Token *t) {
+    if (!t) return NULL;
+    switch (t->type) {
+    case TOK_KEYWORD:
+    case TOK_IDENTIFIER:
+    case TOK_OPERATOR:
+    case TOK_STRING:
+    case TOK_CONCEPT:
+        return t->value.str;
+    default:
+        return NULL;
+    }
+}
+
 /* por compatibilidad historica (p. ej. "a" en formulas) o constructores vec/mat. Las llamadas sistema
    se escriben como identificador-primario en parse_primary. */
 static int keyword_ok_as_user_identifier(const char *s) {
@@ -215,8 +231,8 @@ static int validate_user_defined_name_tok(Parser *p, const Token *tok) {
 }
 
 static int is_decl_type_token(const Token *t) {
-    if (!t || !t->value.str) return 0;
-    const char *s = t->value.str;
+    const char *s = token_union_str(t);
+    if (!s) return 0;
     return (strcmp(s, "entero") == 0 || strcmp(s, "texto") == 0 ||
             strcmp(s, "flotante") == 0 || strcmp(s, "caracter") == 0 ||
             strcmp(s, "bool") == 0 || strcmp(s, "lista") == 0 ||
@@ -808,7 +824,8 @@ static int parse_estructura_params(Parser *p, NodeVec *params) {
         const Token *maybe_type = peek(p, 0);
         char *type_name = NULL;
         char *list_el = NULL;
-        if (maybe_type && maybe_type->value.str && strcmp(maybe_type->value.str, "lista") == 0) {
+        if (maybe_type && maybe_type->type == TOK_KEYWORD && maybe_type->value.str &&
+            strcmp(maybe_type->value.str, "lista") == 0) {
             advance(p);
             type_name = strdup_safe("lista");
             list_el = parse_optional_lista_element_type(p);
@@ -1408,8 +1425,9 @@ static void estructura_window_vec_free(EstructaWindowVec *v) {
 }
 
 static int token_is_word(const Token *t, const char *word) {
-    if (!t || !word || !t->value.str) return 0;
+    if (!t || !word) return 0;
     if (t->type != TOK_KEYWORD && t->type != TOK_IDENTIFIER) return 0;
+    if (!t->value.str) return 0;
     return strcmp(t->value.str, word) == 0;
 }
 
@@ -1618,9 +1636,12 @@ static int ensure_estructura_runtime_imports(Parser *p, NodeVec *globals, int *i
 }
 
 static int is_ident_token_for_lambda(const Token *t) {
-    if (!t || !t->value.str) return 0;
-    if (t->type == TOK_IDENTIFIER) return 1;
-    return (t->type == TOK_KEYWORD && keyword_ok_as_user_identifier(t->value.str));
+    if (!t) return 0;
+    if (t->type == TOK_IDENTIFIER)
+        return t->value.str != NULL;
+    if (t->type == TOK_KEYWORD && t->value.str)
+        return keyword_ok_as_user_identifier(t->value.str);
+    return 0;
 }
 
 /* Parametro invalido en `( ... ) =>`: reservada u otro token; deja last_error si falta. */
@@ -2080,7 +2101,10 @@ static ASTNode *parse_primary(Parser *p) {
     if (t->type == TOK_OPERATOR && t->value.str && strcmp(t->value.str, "[") == 0) {
         advance(p);
         NodeVec el = {0};
-        while (peek(p, 0) && (!peek(p, 0)->value.str || strcmp(peek(p, 0)->value.str, "]") != 0)) {
+        for (;;) {
+            const Token *pk = peek(p, 0);
+            if (!pk) break;
+            if (pk->type == TOK_OPERATOR && pk->value.str && strcmp(pk->value.str, "]") == 0) break;
             ASTNode *e = parse_expression(p);
             if (!e) break;
             node_vec_push(&el, e);
@@ -2097,7 +2121,10 @@ static ASTNode *parse_primary(Parser *p) {
     if (t->type == TOK_OPERATOR && t->value.str && strcmp(t->value.str, "{") == 0) {
         advance(p);
         NodeVec keys = {0}, vals = {0};
-        while (peek(p, 0) && (!peek(p, 0)->value.str || strcmp(peek(p, 0)->value.str, "}") != 0)) {
+        for (;;) {
+            const Token *pk = peek(p, 0);
+            if (!pk) break;
+            if (pk->type == TOK_OPERATOR && pk->value.str && strcmp(pk->value.str, "}") == 0) break;
             ASTNode *k = parse_expression(p);
             if (!k) break;
             expect(p, TOK_OPERATOR, ":", "Se esperaba ':'");
@@ -2924,18 +2951,19 @@ static ASTNode *parse_statement(Parser *p) {
         if (strcmp(t->value.str, "constante") == 0) {
             advance(p);
             const Token *ty = peek(p, 0);
-            if (!ty || !ty->value.str ||
-                (strcmp(ty->value.str, "entero") != 0 && strcmp(ty->value.str, "texto") != 0 &&
-                 strcmp(ty->value.str, "flotante") != 0 && strcmp(ty->value.str, "caracter") != 0 &&
-                 strcmp(ty->value.str, "bool") != 0 && strcmp(ty->value.str, "u32") != 0 &&
-                 strcmp(ty->value.str, "u64") != 0 && strcmp(ty->value.str, "u8") != 0 &&
-                 strcmp(ty->value.str, "byte") != 0 && strcmp(ty->value.str, "vec2") != 0 &&
-                 strcmp(ty->value.str, "vec3") != 0 && strcmp(ty->value.str, "vec4") != 0 && strcmp(ty->value.str, "mat4") != 0 && strcmp(ty->value.str, "mat3") != 0)) {
+            const char *tys = token_union_str(ty);
+            if (!ty || !tys ||
+                (strcmp(tys, "entero") != 0 && strcmp(tys, "texto") != 0 &&
+                 strcmp(tys, "flotante") != 0 && strcmp(tys, "caracter") != 0 &&
+                 strcmp(tys, "bool") != 0 && strcmp(tys, "u32") != 0 &&
+                 strcmp(tys, "u64") != 0 && strcmp(tys, "u8") != 0 &&
+                 strcmp(tys, "byte") != 0 && strcmp(tys, "vec2") != 0 &&
+                 strcmp(tys, "vec3") != 0 && strcmp(tys, "vec4") != 0 && strcmp(tys, "mat4") != 0 && strcmp(tys, "mat3") != 0)) {
                 set_error_here(p, ty ? ty : peek(p, 0),
                     "constante requiere un tipo (entero, texto, flotante, caracter, bool, u32, u64, u8, byte, vec2, vec3, vec4, mat4, mat3).");
                 return NULL;
             }
-            char *tyn = strdup(ty->value.str);
+            char *tyn = strdup(tys);
             advance(p);
             const Token *nt = peek(p, 0);
             if (!validate_user_defined_name_tok(p, nt)) {
@@ -4298,25 +4326,30 @@ static ASTNode *parse_function(Parser *p, int is_exported, int is_async) {
             return NULL;
         }
     }
-    if (!match(p, TOK_KEYWORD, "retorna") && peek(p, 0) && peek(p, 0)->value.str && strcmp(peek(p, 0)->value.str, "retorna") == 0)
-        advance(p);  /* consumir "retorna" si match fallo (p.ej. lexed como ID) */
+    {
+        const Token *pk_ret = peek(p, 0);
+        const char *rts = token_union_str(pk_ret);
+        if (!match(p, TOK_KEYWORD, "retorna") && rts && strcmp(rts, "retorna") == 0)
+            advance(p);  /* consumir "retorna" si match fallo (p.ej. lexed como ID) */
+    }
     char *ret_type = strdup("entero");
     char *return_task_elem = NULL;
     /* Solo consumir tipo de retorno si acabamos de ver "retorna" Y el siguiente token es un tipo válido */
     const Token *rt = peek(p, 0);
-    if (rt && rt->value.str && strcmp(rt->value.str, "fin_funcion") != 0 &&
-        (strcmp(rt->value.str, "entero") == 0 || strcmp(rt->value.str, "texto") == 0 ||
-         strcmp(rt->value.str, "flotante") == 0 || strcmp(rt->value.str, "caracter") == 0 ||
-         strcmp(rt->value.str, "bool") == 0 || strcmp(rt->value.str, "lista") == 0 ||
-         strcmp(rt->value.str, "mapa") == 0 || strcmp(rt->value.str, "u32") == 0 ||
-         strcmp(rt->value.str, "u64") == 0 || strcmp(rt->value.str, "u8") == 0 ||
-         strcmp(rt->value.str, "byte") == 0 || strcmp(rt->value.str, "vec2") == 0 ||
-         strcmp(rt->value.str, "vec3") == 0 || strcmp(rt->value.str, "vec4") == 0 || strcmp(rt->value.str, "mat4") == 0 || strcmp(rt->value.str, "mat3") == 0 ||
-         strcmp(rt->value.str, "bytes") == 0 || strcmp(rt->value.str, "socket") == 0 || strcmp(rt->value.str, "tls") == 0 ||
-         strcmp(rt->value.str, "http_solicitud") == 0 || strcmp(rt->value.str, "http_respuesta") == 0 || strcmp(rt->value.str, "http_servidor") == 0 ||
-         strcmp(rt->value.str, "tarea") == 0)) {
+    const char *rts_rt = token_union_str(rt);
+    if (rts_rt && strcmp(rts_rt, "fin_funcion") != 0 &&
+        (strcmp(rts_rt, "entero") == 0 || strcmp(rts_rt, "texto") == 0 ||
+         strcmp(rts_rt, "flotante") == 0 || strcmp(rts_rt, "caracter") == 0 ||
+         strcmp(rts_rt, "bool") == 0 || strcmp(rts_rt, "lista") == 0 ||
+         strcmp(rts_rt, "mapa") == 0 || strcmp(rts_rt, "u32") == 0 ||
+         strcmp(rts_rt, "u64") == 0 || strcmp(rts_rt, "u8") == 0 ||
+         strcmp(rts_rt, "byte") == 0 || strcmp(rts_rt, "vec2") == 0 ||
+         strcmp(rts_rt, "vec3") == 0 || strcmp(rts_rt, "vec4") == 0 || strcmp(rts_rt, "mat4") == 0 || strcmp(rts_rt, "mat3") == 0 ||
+         strcmp(rts_rt, "bytes") == 0 || strcmp(rts_rt, "socket") == 0 || strcmp(rts_rt, "tls") == 0 ||
+         strcmp(rts_rt, "http_solicitud") == 0 || strcmp(rts_rt, "http_respuesta") == 0 || strcmp(rts_rt, "http_servidor") == 0 ||
+         strcmp(rts_rt, "tarea") == 0)) {
         free(ret_type);
-        ret_type = strdup_safe(rt->value.str);
+        ret_type = strdup_safe(rts_rt);
         advance(p);
         if (ret_type && strcmp(ret_type, "tarea") == 0) {
             if (!parse_optional_tarea_inner_type_after_tarea_keyword(p, &return_task_elem)) {
@@ -4394,7 +4427,10 @@ static ASTNode *parse_struct_body(Parser *p, int is_clase) {
     }
     char **ft = NULL, **fn = NULL;
     size_t nf = 0, cap = 0;
-    while (peek(p, 0) && peek(p, 0)->value.str && !struct_kw_is_closer(peek(p, 0)->value.str, is_clase)) {
+    while (peek(p, 0)) {
+        const Token *phead = peek(p, 0);
+        const char *kws = token_union_str(phead);
+        if (!kws || struct_kw_is_closer(kws, is_clase)) break;
         const Token *tblk = peek(p, 0);
         if (tblk && tblk->type == TOK_KEYWORD && tblk->value.str) {
             const char *kw = tblk->value.str;
