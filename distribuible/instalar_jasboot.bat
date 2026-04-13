@@ -42,31 +42,31 @@ if not exist "%VSCODE_DIR%" mkdir "%VSCODE_DIR%"
 
 :: 5. Copiar archivos del compilador
 echo [+] Copiando compilador Jasboot...
-copy /y "..\bin\jbc.exe" "%BIN_DIR%\" >nul
-copy /y "..\jas-compiler-c\bin\jbc.exe" "%BIN_DIR%\jbc-c.exe" >nul
-copy /y "..\jas-compiler-c\bin\jbc-next.exe" "%BIN_DIR%\" >nul
-copy /y "..\jas-compiler-c\bin\jbc-cursor.exe" "%BIN_DIR%\" >nul
+copy /y "bin\jbc.exe" "%BIN_DIR%\" >nul
+copy /y "bin\jbc-c.exe" "%BIN_DIR%\" >nul
+copy /y "bin\jbc-next.exe" "%BIN_DIR%\" >nul
+copy /y "bin\jbc-cursor.exe" "%BIN_DIR%\" >nul
 
 :: 6. Copiar runtime
 echo [+] Copiando runtime Jasboot IR...
-copy /y "..\jasboot-ir\bin\jasboot-ir-vm.exe" "%RUNTIME_DIR%\" >nul
-copy /y "..\jasboot-ir\bin\jasboot-ir-vm-trace.exe" "%RUNTIME_DIR%\" >nul
+copy /y "runtime\jasboot-ir-vm.exe" "%RUNTIME_DIR%\" >nul
+copy /y "runtime\jasboot-ir-vm-trace.exe" "%RUNTIME_DIR%\" >nul
 
 :: 7. Copiar documentación y recursos
 echo [+] Copiando documentación y recursos...
-copy /y "..\jas-compiler-c\README.md" "%DOCS_DIR%\" >nul
+copy /y "docs\README.md" "%DOCS_DIR%\" >nul
+copy /y "docs\SDK_README.md" "%DOCS_DIR%\" >nul
 copy /y "img\jasboot-icon.ico" "%IMG_DIR%\" >nul
 copy /y "img\jasboot-icon.png" "%IMG_DIR%\" >nul
 copy /y "README.md" "%INSTALL_DIR%\" >nul
 
 :: 8. Copiar ejemplos
 echo [+] Copiando ejemplos y plantillas...
-xcopy /E /I /Y "..\apps\neurixis_IA\*.jasb" "%EXAMPLES_DIR%\neurixis_IA\" >nul 2>&1
-xcopy /E /I /Y "..\apps\*.jasb" "%EXAMPLES_DIR%\" >nul 2>&1
+xcopy /E /I /Y "examples\*" "%EXAMPLES_DIR%\" >nul 2>&1
 
 :: 9. Copiar extensión VSCode
 echo [+] Copiando extensión VSCode...
-xcopy /E /I /Y "..\vscode-jasboot\*" "%VSCODE_DIR%\" >nul 2>&1
+xcopy /E /I /Y "vscode\*" "%VSCODE_DIR%\" >nul 2>&1
 
 :: 10. Configurar variables de entorno (OBLIGATORIO)
 echo [+] Configurando variables de entorno del sistema...

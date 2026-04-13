@@ -56,13 +56,13 @@ Section "Jasboot Compiler (Requerido)" SEC01
     SectionIn RO
     
     SetOutPath "$INSTDIR\bin"
-    File "..\bin\jbc.exe"
-    File "..\jas-compiler-c\bin\jbc.exe"
-    File "..\jas-compiler-c\bin\jbc-next.exe"
-    File "..\jas-compiler-c\bin\jbc-cursor.exe"
+    File "bin\jbc.exe"
+    File "bin\jbc-c.exe"
+    File "bin\jbc-next.exe"
+    File "bin\jbc-cursor.exe"
     
     SetOutPath "$INSTDIR\docs"
-    File /nonfatal "..\jas-compiler-c\README.md"
+    File /nonfatal "docs\README.md"
     
     # Crear accesos directos
     CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
@@ -71,11 +71,11 @@ SectionEnd
 
 Section "Jasboot IR Runtime" SEC02
     SetOutPath "$INSTDIR\runtime"
-    File "..\jasboot-ir\bin\jasboot-ir-vm.exe"
-    File "..\jasboot-ir\bin\jasboot-ir-vm-trace.exe"
+    File "runtime\jasboot-ir-vm.exe"
+    File "runtime\jasboot-ir-vm-trace.exe"
     
     SetOutPath "$INSTDIR\lib"
-    File /nonfatal "..\jasboot-ir\*.jasb"
+    File /nonfatal "lib\*.jasb"
     
     # Acceso directo para la VM
     CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Jasboot VM.lnk" "$INSTDIR\runtime\jasboot-ir-vm.exe" "" "$INSTDIR\img\jasboot-icon.ico"
@@ -83,7 +83,7 @@ SectionEnd
 
 Section "VSCode Extension" SEC03
     SetOutPath "$INSTDIR\vscode"
-    File /r "..\vscode-jasboot\*"
+    File /r "vscode\*"
     
     # Acceso directo para documentación
     CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\VSCode Extension.lnk" "https://marketplace.visualstudio.com/items?itemName=JASBOOTSTUDIOS.vscode-jasboot"
@@ -91,8 +91,7 @@ SectionEnd
 
 Section "Ejemplos y Plantillas" SEC04
     SetOutPath "$INSTDIR\examples"
-    File /r "..\apps\neurixis_IA\*.jasb"
-    File /r "..\apps\*.jasb"
+    File /r "examples\*"
     
     # Acceso directo a ejemplos
     CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Ejemplos.lnk" "$INSTDIR\examples"
