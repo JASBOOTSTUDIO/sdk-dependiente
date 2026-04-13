@@ -2903,7 +2903,9 @@ static int vm_try_catch_or_abort(VM* vm, const char* msg) {
 static int vm_memoria_abierta_en_este_bloque(VM* vm) {
 #ifdef JASBOOT_LANG_INTEGRATION
     if (!vm || !vm->mem_neuronal) return 0;
-    return vm->mem_neuronal_owner_depth == vm_call_depth(vm);
+    /* REPARACIÓN: No restringir el cierre a la misma profundidad de llamada.
+       Esto permite que objetos (como AlmacenamientoSemantico) gestionen la memoria. */
+    return 0; 
 #else
     (void)vm;
     return 0;
@@ -3435,7 +3437,6 @@ int vm_step(VM* vm) {
             uint32_t map_id_val = (uint32_t)b_val;
             uint32_t key_val = (uint32_t)c_val;
             uint32_t existe = 0;
-            if (getenv("JASBOOT_DEBUG")) printf("[VM] OP_MEM_MAPA_CONTIENE: map=%u, key=%u\n", map_id_val, key_val);
 #ifdef JASBOOT_LANG_INTEGRATION
             ensure_jmn_col(vm);
             if (vm->mem_colecciones) {
@@ -3445,7 +3446,6 @@ int vm_step(VM* vm) {
                 }
             }
 #endif
-            if (getenv("JASBOOT_DEBUG")) printf("[VM]   -> existe=%u\n", existe);
             vm_set_register(vm, inst.operand_a, (uint64_t)existe);
             vm->pc += IR_INSTRUCTION_SIZE;
             break;

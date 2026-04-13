@@ -3445,10 +3445,11 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         
         /* Empaquetar: (K << 8) | tipo */
         emit(cg, OP_MOVER, 13, 8, 0, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
-        emit(cg, OP_BIT_SHL, 14, 11, 13, 0); /* 14 = K << 8 */
-        emit(cg, OP_SUMAR, 15, 14, 12, 0);   /* 15 = (K << 8) | tipo */
+        emit(cg, OP_BIT_SHL, 14, 11, 13, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER); /* 14 = K << 8 */
+        emit(cg, OP_SUMAR, 15, 14, 12, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);   /* 15 = (K << 8) | tipo */
         
-        emit(cg, OP_MEM_BUSCAR_ASOCIADOS_LISTA, (uint8_t)dest_reg, 10, 15, 0);
+        emit(cg, OP_MEM_BUSCAR_ASOCIADOS_LISTA, (uint8_t)dest_reg, 10, 15, 
+             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
         return 1;
     }
     if (strcmp(name, "comparar_patrones") == 0) {
@@ -4260,7 +4261,8 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
                  IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_IMMEDIATE);
         } else {
             visit_expression(cg, ARG2, 3);
-            emit(cg, OP_MEM_ASOCIAR_CONCEPTOS, 1, 2, 3, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+            emit(cg, OP_MEM_ASOCIAR_CONCEPTOS, 1, 2, 3, 
+                 IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
         }
         return 1;
     }
