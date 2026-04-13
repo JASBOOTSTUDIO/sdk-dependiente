@@ -4228,13 +4228,12 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         }
         visit_expression(cg, ARG0, 1);
         visit_expression(cg, ARG1, 2);
-        emit(cg, OP_MEM_OBTENER_FUERZA, (uint8_t)dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
-        emit(cg, OP_CMP_GT_FLT, (uint8_t)dest_reg, (uint8_t)dest_reg, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_IMMEDIATE);
+        emit(cg, OP_MEM_MAPA_CONTIENE, (uint8_t)dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
         return 1;
     }
 
     /* 6.9 Memoria neuronal */
-    if (strcmp(name, "mem_crear") == 0) {
+    if (strcmp(name, "mem_crear") == 0 || strcmp(name, "abrir_memoria") == 0 || strcmp(name, "crear_memoria") == 0) {
         if (!ARG0) return 0;
         visit_expression(cg, ARG0, 1);
         if (ARG1) visit_expression(cg, ARG1, 2); else emit(cg, OP_MOVER, 2, 0, 0, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
@@ -4243,7 +4242,7 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         emit(cg, OP_MOVER, dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
         return 1;
     }
-    if (strcmp(name, "mem_cerrar") == 0) {
+    if (strcmp(name, "mem_cerrar") == 0 || strcmp(name, "cerrar_memoria") == 0) {
         emit(cg, OP_MEM_CERRAR, 0, 0, 0, 0);
         return 1;
     }
@@ -4270,6 +4269,40 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         visit_expression(cg, ARG0, 1);
         visit_expression(cg, ARG1, 2);
         emit(cg, OP_MEM_OBTENER_FUERZA, dest_reg, 1, 2, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+
+    if (strcmp(name, "fs_borrar") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_FS_BORRAR, dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "fs_copiar") == 0) {
+        if (cn->n_args < 2) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_FS_COPIAR, dest_reg, 1, 2, IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "fs_mover") == 0) {
+        if (cn->n_args < 2) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_FS_MOVER, dest_reg, 1, 2, IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "fs_tamano") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_FS_TAMANO, dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "mem_obtener_relacion") == 0) {
+        if (cn->n_args < 2) return 0;
+        visit_expression(cg, ARG0, 1);
+        visit_expression(cg, ARG1, 2);
+        emit(cg, OP_MEM_OBTENER_RELACION, dest_reg, 1, 2, IR_INST_FLAG_B_REGISTER);
         return 1;
     }
 

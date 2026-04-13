@@ -2885,7 +2885,13 @@ static void vm_put_throw_texto(VM* vm, const char* msg) {
 static int vm_try_catch_or_abort(VM* vm, const char* msg) {
     if (!vm || !vm->ir || vm->try_depth <= 0) return 0;
     size_t code_start = vm_code_start(vm->ir);
-    uint32_t off = vm->try_code_off[vm->try_depth - 1];
+    int idx = vm->try_depth - 1;
+    uint32_t off = vm->try_code_off[idx];
+    vm->fp = vm->try_fp[idx];
+    vm->sp = vm->try_sp[idx];
+    vm->stack_ptr = vm->try_stack_ptr[idx];
+    vm->fp_stack_ptr = vm->try_fp_stack_ptr[idx];
+    vm->current_closure_env = vm->try_closure_env[idx];
     vm->try_depth--;
     vm_put_throw_texto(vm, msg);
     vm->pc = code_start + (size_t)off;
@@ -3425,6 +3431,26 @@ int vm_step(VM* vm) {
             break;
         }
 
+        case OP_MEM_MAPA_CONTIENE: {
+            uint32_t map_id_val = (uint32_t)b_val;
+            uint32_t key_val = (uint32_t)c_val;
+            uint32_t existe = 0;
+            if (getenv("JASBOOT_DEBUG")) printf("[VM] OP_MEM_MAPA_CONTIENE: map=%u, key=%u\n", map_id_val, key_val);
+#ifdef JASBOOT_LANG_INTEGRATION
+            ensure_jmn_col(vm);
+            if (vm->mem_colecciones) {
+                JMNValor val;
+                if (jmn_mapa_obtener_si_existe(vm->mem_colecciones, map_id_val, key_val, &val)) {
+                    existe = 1;
+                }
+            }
+#endif
+            if (getenv("JASBOOT_DEBUG")) printf("[VM]   -> existe=%u\n", existe);
+            vm_set_register(vm, inst.operand_a, (uint64_t)existe);
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+
         case OP_IR: {
             if (inst.flags & IR_INST_FLAG_A_IMMEDIATE) {
                 uint32_t target = vm_decode_u24(inst.operand_a, inst.operand_b, inst.operand_c, inst.flags);
@@ -3450,7 +3476,14 @@ int vm_step(VM* vm) {
                 vm->exit_code = 1;
                 return 0;
             }
-            vm->try_code_off[vm->try_depth++] = target;
+            int idx = vm->try_depth;
+            vm->try_code_off[idx] = target;
+            vm->try_fp[idx] = vm->fp;
+            vm->try_sp[idx] = vm->sp;
+            vm->try_stack_ptr[idx] = vm->stack_ptr;
+            vm->try_fp_stack_ptr[idx] = vm->fp_stack_ptr;
+            vm->try_closure_env[idx] = vm->current_closure_env;
+            vm->try_depth++;
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }

@@ -24,7 +24,7 @@ const char *const KEYWORDS[] = {
     "con", "valor", "peso", "igual", "es", "entrada", "entonces", "retorna",
     "extraer_antes_de", "extraer_despues_de", "contiene_texto", "termina_con", "ultima_palabra",
     "copiar_texto", "asociar_pesos_conceptos", "imprimir_auditoria", "como", "o", "y", "no",
-    "define_concepto", "crear_memoria", "cerrar_memoria", "mayor", "menor", "distinto", "que", "de", "a",
+    "define_concepto", "crear_memoria", "abrir_memoria", "cerrar_memoria", "mayor", "menor", "distinto", "que", "de", "a",
     "concepto", "fin_concepto", "crear_concepto", "propiedad_concepto",
     "abrir_archivo", "cerrar_archivo", "escribir_archivo", "leer_linea_archivo",
     "fin_archivo", "existe_archivo", "obtener_todos_conceptos", "obtener_relacionados",

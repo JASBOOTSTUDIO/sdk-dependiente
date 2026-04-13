@@ -220,6 +220,7 @@ typedef enum {
     OP_MEM_MAPA_PONER = 0x62,        // SetMap(A:map_id, B:key_id, C:val_reg)
     OP_MEM_MAPA_OBTENER = 0x63,      // A <- GetMap(B:map_id, C:key_id)
     OP_MEM_MAPA_TAMANO = 0x7E,       // A <- count entries (B: map_id reg)
+    OP_MEM_MAPA_CONTIENE = 0x08,     // A <- 1 if key C exists in map B, else 0
     OP_FS_LEER_BYTE = 0x64,          // A <- fgetc(handle B)
     OP_FS_ESCRIBIR_U32 = 0x65,       // fwrite(u32 B, f handle A)
     OP_FS_LEER_ARCHIVO_REG = 0x66,   // A: path_reg, B: dest_id_reg
