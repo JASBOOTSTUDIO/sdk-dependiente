@@ -224,6 +224,12 @@ int jmn_io_cargar(JMNMemoria* mem, const char* ruta) {
         crc = jmn_crc32_update(crc, mem->textos[slot].texto, toread);
         mem->textos[slot].texto[255] = '\0';
         mem->textos[slot].used = 1;
+
+        /* REPARACIÓN: Actualizar hash_textos para que find_texto_slot funcione tras cargar */
+        uint32_t h = jmn_hash_u32(id) % JMN_HASH_SIZE;
+        mem->textos[slot].next_hash = mem->hash_textos[h];
+        mem->hash_textos[h] = slot;
+
         mem->num_textos++;
     }
 
