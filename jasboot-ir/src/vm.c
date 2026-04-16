@@ -3011,7 +3011,7 @@ int vm_step(VM* vm) {
                 addr += vm->fp;
             }
             
-            if (addr + sizeof(uint64_t) <= vm->memory_size) {
+            if (addr + 8 <= vm->memory_size) {
                 uint64_t value = *(uint64_t*)(vm->memory + addr);
                 vm_set_register(vm, inst.operand_a, value);
             }
@@ -3041,7 +3041,7 @@ int vm_step(VM* vm) {
                 addr += vm->fp;
             }
             
-            if (addr + sizeof(uint64_t) <= vm->memory_size) {
+            if (addr + 8 <= vm->memory_size) {
                  *(uint64_t*)(vm->memory + addr) = b_val;
             }
             vm->pc += IR_INSTRUCTION_SIZE;
@@ -3597,25 +3597,23 @@ int vm_step(VM* vm) {
         }
 
         case OP_HEAP_RESERVAR: {
-            /* Usar b_val (resuelto por get_operand_value); si B|C inmediatos, combinar para valores >255 */
             uint64_t bytes = b_val;
             if ((inst.flags & IR_INST_FLAG_B_IMMEDIATE) && (inst.flags & IR_INST_FLAG_C_IMMEDIATE))
                 bytes |= (uint64_t)inst.operand_c << 8;
-            void* ptr = (bytes > 0 && bytes < (1ULL << 30)) ? malloc((size_t)bytes) : NULL;
-            if (ptr) {
-                if (vm->heap_count >= vm->heap_cap) {
-                    size_t new_cap = vm->heap_cap ? vm->heap_cap * 2 : 16;
-                    void** p = (void**)realloc(vm->heap_ptrs, new_cap * sizeof(void*));
-                    if (p) {
-                        vm->heap_ptrs = p;
-                        vm->heap_cap = new_cap;
-                    }
-                }
-                if (vm->heap_ptrs && vm->heap_count < vm->heap_cap) {
-                    vm->heap_ptrs[vm->heap_count++] = ptr;
-                }
+            
+            /* Allocate from 2MB mark in vm->memory */
+            static uint32_t heap_top = 0x200000;
+            if (vm->pc == 0) heap_top = 0x200000;
+            
+            uint32_t addr = heap_top;
+            if (addr + bytes <= vm->memory_size) {
+                memset(vm->memory + addr, 0, (size_t)bytes);
             }
-            vm_set_register(vm, inst.operand_a, (uint64_t)(uintptr_t)ptr);
+            
+            heap_top += (uint32_t)bytes;
+            heap_top = (heap_top + 7) & ~7; /* Align */
+            
+            vm_set_register(vm, inst.operand_a, (uint64_t)addr);
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
@@ -4170,6 +4168,11 @@ int vm_step(VM* vm) {
                     vm->pc += IR_INSTRUCTION_SIZE;
                     break;
                 }
+            }
+            
+            /* Debug: si el ID parece una direccion de heap, imprimir un aviso */
+            if (id >= 0x200000 && id < 0x800000) {
+                // printf("[DEBUG: id %08X looks like heap address]\n", id);
             }
 
             if (id != 0 || (inst.flags & IR_INST_FLAG_A_REGISTER)) {
@@ -8086,7 +8089,7 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
             uint64_t addr = (flags & IR_INST_FLAG_B_IMMEDIATE) ? (uint64_t)op_b : b_val;
             if ((flags & IR_INST_FLAG_B_IMMEDIATE) && (flags & IR_INST_FLAG_C_IMMEDIATE)) addr |= ((uint64_t)op_c << 8);
             if (flags & IR_INST_FLAG_RELATIVE) addr += vm->fp;
-            if (addr + sizeof(uint64_t) <= vm->memory_size) regs[op_a] = *(uint64_t*)(vm->memory + addr);
+            if (addr + 8 <= vm->memory_size) regs[op_a] = *(uint64_t*)(vm->memory + addr);
             vm->pc += IR_INSTRUCTION_SIZE;
         }
         STEP_AND_DISPATCH();
@@ -8101,7 +8104,7 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
             uint64_t addr = (flags & IR_INST_FLAG_A_IMMEDIATE) ? (uint64_t)op_a : a_val;
             if ((flags & IR_INST_FLAG_A_IMMEDIATE) && (flags & IR_INST_FLAG_C_IMMEDIATE)) addr |= ((uint64_t)op_c << 8);
             if (flags & IR_INST_FLAG_RELATIVE) addr += vm->fp;
-            if (addr + sizeof(uint64_t) <= vm->memory_size) *(uint64_t*)(vm->memory + addr) = b_val;
+            if (addr + 8 <= vm->memory_size) *(uint64_t*)(vm->memory + addr) = b_val;
             vm->pc += IR_INSTRUCTION_SIZE;
         }
         STEP_AND_DISPATCH();
@@ -8151,6 +8154,8 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
         uint8_t op_a = code_ptr[2];
         uint8_t op_b = code_ptr[3];
         uint8_t op_c = code_ptr[4];
+        
+        /* printf("[VM STEP] pc=0x%08llX opcode=0x%02X flags=0x%02X a=%d b=%d c=%d\n", (unsigned long long)vm->pc, opcode, flags, op_a, op_b, op_c); */
 
         uint64_t a_val = 0, b_val = 0, c_val = 0;
         if (opcode != OP_DEBUG_LINE) {
@@ -8292,8 +8297,12 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
                     addr |= ((uint64_t)op_c << 8);
                 }
                 if (flags & IR_INST_FLAG_RELATIVE) addr += vm->fp;
-                if (addr + sizeof(uint64_t) <= vm->memory_size) {
-                    STORE_REG_FAST(op_a, *(uint64_t*)(vm->memory + addr));
+                if (addr + 8 <= vm->memory_size) {
+                    uint64_t val = *(uint64_t*)(vm->memory + addr);
+                    STORE_REG_FAST(op_a, val);
+                    /* printf("[VM READ] memory[0x%08llX] = 0x%016llX\n", (unsigned long long)addr, (unsigned long long)val); */
+                } else if (addr != 0) {
+                    STORE_REG_FAST(op_a, *(uint64_t*)(uintptr_t)addr);
                 }
                 vm->pc += IR_INSTRUCTION_SIZE;
                 break;
@@ -8308,8 +8317,10 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
                     addr |= ((uint64_t)op_c << 8);
                 }
                 if (flags & IR_INST_FLAG_RELATIVE) addr += vm->fp;
-                if (addr + sizeof(uint64_t) <= vm->memory_size) {
+                if (addr + 8 <= vm->memory_size) {
                     *(uint64_t*)(vm->memory + addr) = b_val;
+                } else if (addr != 0) {
+                    *(uint64_t*)(uintptr_t)addr = b_val;
                 }
                 vm->pc += IR_INSTRUCTION_SIZE;
                 break;

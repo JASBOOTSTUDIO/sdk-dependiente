@@ -4770,6 +4770,7 @@ static ASTNode *parse_struct_body(Parser *p, int is_clase, int is_exported) {
     sn->method_visibilities = mv;
     sn->n_methods = nm;
     sn->is_exported = is_exported;
+    sn->is_clase = is_clase;
     return (ASTNode*)sn;
 
 parse_struct_body_fail:

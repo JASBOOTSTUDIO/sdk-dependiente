@@ -1667,12 +1667,18 @@ static const char *get_expression_type(CodeGen *cg, ASTNode *node) {
             if (is_node(cn->callee, NODE_MEMBER_ACCESS)) {
                 MemberAccessNode *ma = (MemberAccessNode *)cn->callee;
                 const char *obj_type = get_expression_type(cg, ma->target);
-                if (obj_type) {
-                    char full_name[256];
-                    snprintf(full_name, sizeof(full_name), "%s.%s", obj_type, ma->member);
-                    for (size_t i = 0; i < cg->n_funcs; i++) {
-                        if (cg->func_names[i] && strcmp(cg->func_names[i], full_name) == 0)
-                            return cg->func_return_types[i] ? cg->func_return_types[i] : "entero";
+                if (obj_type && !is_builtin_type(obj_type)) {
+                    /* Buscar el metodo recursivamente en la jerarquia para obtener su tipo de retorno */
+                    const char *curr = obj_type;
+                    while (curr) {
+                        char full_name[256];
+                        snprintf(full_name, sizeof(full_name), "%s.%s", curr, ma->member);
+                        for (size_t i = 0; i < cg->n_funcs; i++) {
+                            if (cg->func_names[i] && strcmp(cg->func_names[i], full_name) == 0)
+                                return cg->func_return_types[i] ? cg->func_return_types[i] : "entero";
+                        }
+                        StructInfo *si = sym_get_struct_info(&cg->sym, curr);
+                        curr = (si && si->base_name) ? si->base_name : NULL;
                     }
                 }
             }
@@ -1687,6 +1693,30 @@ static const char *get_expression_type(CodeGen *cg, ASTNode *node) {
                 return "texto";
         }
         if (cn->name && !cn->callee) {
+            /* 1. Buscar si es un constructor de clase/registro */
+            StructInfo *si_cons = sym_get_struct_info(&cg->sym, cn->name);
+            if (si_cons) return si_cons->name;
+
+            /* 2. Buscar si es un metodo de la clase actual (o base) en llamada implicita */
+            if (cg->current_class_name) {
+                const char *curr = cg->current_class_name;
+                while (curr) {
+                    char full_name[256];
+                    snprintf(full_name, sizeof(full_name), "%s.%s", curr, cn->name);
+                    for (size_t i = 0; i < cg->n_funcs; i++) {
+                        if (cg->func_names[i] && strcmp(cg->func_names[i], full_name) == 0)
+                            return cg->func_return_types[i] ? cg->func_return_types[i] : "entero";
+                    }
+                    StructInfo *si = sym_get_struct_info(&cg->sym, curr);
+                    curr = (si && si->base_name) ? si->base_name : NULL;
+                }
+            }
+
+            /* 3. Luego funciones globales o variables de tipo funcion */
+            for (size_t i = 0; i < cg->n_funcs; i++) {
+                if (cg->func_names[i] && strcmp(cg->func_names[i], cn->name) == 0)
+                    return cg->func_return_types[i] ? cg->func_return_types[i] : "entero";
+            }
             SymResult vr = sym_lookup(&cg->sym, cn->name);
             const char *vty = vr.found ? sym_lookup_type(&cg->sym, cn->name) : NULL;
             if (vr.found && !vr.macro_ast && vty && strcmp(vty, "funcion") == 0)
@@ -2100,10 +2130,75 @@ static void emit_format_struct_string_reg(CodeGen *cg, const char *struct_name, 
 
 static int get_func_label(CodeGen *cg, const char *name) {
     if (!name) return -1;
-    for (size_t i = 0; i < cg->n_funcs; i++)
-        if (cg->func_names[i] && strcmp(cg->func_names[i], name) == 0)
+    for (size_t i = 0; i < cg->n_funcs; i++) {
+        if (cg->func_names[i] && strcmp(cg->func_names[i], name) == 0) {
             return cg->func_labels[i];
+        }
+    }
     return -1;
+}
+
+static int get_method_label_recursive(CodeGen *cg, const char *class_name, const char *method_name) {
+    if (!class_name || !method_name) return -1;
+    char full_name[256];
+    snprintf(full_name, sizeof(full_name), "%s.%s", class_name, method_name);
+    int label_id = get_func_label(cg, full_name);
+    if (label_id >= 0) return label_id;
+    
+    /* Buscar en base class */
+    StructInfo *si = sym_get_struct_info(&cg->sym, class_name);
+    if (si && si->base_name) {
+        return get_method_label_recursive(cg, si->base_name, method_name);
+    }
+    return -1;
+}
+
+static int emit_dynamic_dispatch(CodeGen *cg, const char *obj_type, const char *method_name, CallNode *cn, int dest_reg, int is_statement) {
+    StructInfo *base_si = sym_get_struct_info(&cg->sym, obj_type);
+    if (!base_si || !base_si->is_class) return 0;
+    
+    int has_overrides = 0;
+    for (size_t i = 0; i < cg->sym.n_structs; i++) {
+        StructInfo *si = &cg->sym.structs[i];
+        if (si->is_class && strcmp(si->name, obj_type) != 0 && sym_is_subclass_of(&cg->sym, si->name, obj_type)) {
+            for (size_t j = 0; j < si->n_methods; j++) {
+                if (strcmp(si->methods[j].name, method_name) == 0) {
+                    has_overrides = 1; break;
+                }
+            }
+        }
+        if (has_overrides) break;
+    }
+    if (!has_overrides) return 0;
+
+    const int class_id_reg = 120;
+    emit(cg, OP_LEER, (uint8_t)class_id_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
+    int end_label = new_label(cg);
+    
+    for (size_t i = 0; i < cg->sym.n_structs; i++) {
+        StructInfo *si = &cg->sym.structs[i];
+        if (si->is_class && sym_is_subclass_of(&cg->sym, si->name, obj_type)) {
+            int label_id = get_method_label_recursive(cg, si->name, method_name);
+            if (label_id >= 0) {
+                int next_case = new_label(cg);
+                int match_reg = 121;
+                size_t off = add_string(cg, si->name);
+                emit_load_str_hash_in_reg(cg, off, match_reg);
+                emit(cg, OP_CMP_EQ, (uint8_t)match_reg, (uint8_t)class_id_reg, (uint8_t)match_reg, 0);
+                emit(cg, OP_CMP_EQ, (uint8_t)match_reg, (uint8_t)match_reg, 0, IR_INST_FLAG_C_IMMEDIATE);
+                emit(cg, OP_SI, (uint8_t)match_reg, 0, 0, IR_INST_FLAG_A_REGISTER);
+                add_patch(cg, next_case, PATCH_SI);
+                emit(cg, OP_LLAMAR, 0, 0, 0, IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+                add_patch(cg, label_id, PATCH_JUMP);
+                if (!is_statement) emit(cg, OP_MOVER, dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
+                emit(cg, OP_IR, 0, 0, 0, 0);
+                add_patch(cg, end_label, PATCH_JUMP);
+                mark_label(cg, next_case);
+            }
+        }
+    }
+    mark_label(cg, end_label);
+    return 1;
 }
 
 static const char *get_member_chain_type(CodeGen *cg, ASTNode *node) {
@@ -2174,7 +2269,7 @@ static void emit_escribir_u24(CodeGen *cg, uint32_t addr, int val_reg, int is_re
         emit(cg, OP_ESCRIBIR, (uint8_t)(addr & 0xFF), (uint8_t)val_reg, (uint8_t)((addr >> 8) & 0xFF), fl);
     } else {
         const int tmp = 120; // Registro temporal seguro
-        emit(cg, OP_MOVER_U24, (uint8_t)tmp, (uint8_t)(addr & 0xFF), (uint8_t)((addr >> 8) & 0xFF), IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE | (uint8_t)((addr >> 16) & 0xFF));
+        emit(cg, OP_MOVER_U24, (uint8_t)tmp, (uint8_t)(addr & 0xFF), (uint8_t)((addr >> 8) & 0xFF), (uint8_t)((addr >> 16) & 0xFF));
         emit(cg, OP_ESCRIBIR, (uint8_t)tmp, (uint8_t)val_reg, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | (is_relative ? IR_INST_FLAG_RELATIVE : 0));
     }
 }
@@ -2187,7 +2282,7 @@ static void emit_leer_u24(CodeGen *cg, int dest_reg, uint32_t addr, int is_relat
         emit(cg, OP_LEER, (uint8_t)dest_reg, (uint8_t)(addr & 0xFF), (uint8_t)((addr >> 8) & 0xFF), fl);
     } else {
         const int tmp = 120; // Registro temporal seguro
-        emit(cg, OP_MOVER_U24, (uint8_t)tmp, (uint8_t)(addr & 0xFF), (uint8_t)((addr >> 8) & 0xFF), IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE | (uint8_t)((addr >> 16) & 0xFF));
+        emit(cg, OP_MOVER_U24, (uint8_t)tmp, (uint8_t)(addr & 0xFF), (uint8_t)((addr >> 8) & 0xFF), (uint8_t)((addr >> 16) & 0xFF));
         emit(cg, OP_LEER, (uint8_t)dest_reg, (uint8_t)tmp, 0, IR_INST_FLAG_B_REGISTER | (is_relative ? IR_INST_FLAG_RELATIVE : 0));
     }
 }
@@ -2208,12 +2303,13 @@ static MemberAddrResult get_member_address(CodeGen *cg, ASTNode *node, int dest_
             return r;
         }
         
-        /* Caso especial: 'este' es un puntero a la instancia */
-        if (strcmp(name, "este") == 0) {
+        /* Si es un objeto (puntero en el heap), cargar su direccion */
+        const char *type = sym_lookup_type(&cg->sym, name);
+        if (type && !is_builtin_type(type)) {
             emit_leer_u24(cg, dest_reg, sr.addr, sr.is_relative);
             r.in_reg = 1;
             r.reg = dest_reg;
-            r.is_relative = 0; /* El valor leido ya es una direccion completa */
+            r.is_relative = 0; // El valor cargado es una direccion absoluta del heap
             return r;
         }
 
@@ -2491,7 +2587,7 @@ static void codegen_emit_mem_lista_agregar_from_regs(CodeGen *cg, uint8_t list_r
 /* --- Nivel 6: visit_call_sistema --- */
 static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
     const char *name = cn->name;
-    if (!name) return 0;
+    if (!name || cn->callee) return 0;
     if (!is_sistema_llamada(name, strlen(name))) return 0;
 
 #define ARG0 (cn->n_args > 0 ? cn->args[0] : NULL)
@@ -4843,6 +4939,7 @@ static void emit_print(CodeGen *cg, ASTNode *expr, int stmt_line, int stmt_col) 
         }
     } else {
         const char *t = get_expression_type(cg, expr);
+        /* fprintf(stderr, "DEBUG: emit_print type=%s\n", t ? t : "NULL"); */
         {
             int el = (expr->line > 0) ? expr->line : stmt_line;
             int ec = (expr->col > 0) ? expr->col : stmt_col;
@@ -5399,65 +5496,47 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
     if (is_node(node, NODE_CALL)) {
         CallNode *cn = (CallNode*)node;
         
-        if (visit_call_sistema(cg, cn, dest_reg)) {
-            if (cg->has_error) return dest_reg;
-            return dest_reg;
-        }
-
-        /* 1. Caso especial: Llamada a metodo explicito obj.metodo(...) */
+        /* 1. Caso especial: Llamada a metodo explicito obj.metodo(...) 
+           Debe ir ANTES de visit_call_sistema para evitar conflictos con palabras clave (ej: dormir) */
         if (cn->callee && is_node(cn->callee, NODE_MEMBER_ACCESS)) {
             MemberAccessNode *ma = (MemberAccessNode *)cn->callee;
             const char *obj_type = get_expression_type(cg, ma->target);
             if (obj_type && !is_builtin_type(obj_type)) {
-                char full_name[256];
-                snprintf(full_name, sizeof(full_name), "%s.%s", obj_type, ma->member);
-                int label_id = get_func_label(cg, full_name);
+                /* Evaluar instancia 'este' -> reg 1 */
+                if (is_node(ma->target, NODE_IDENTIFIER)) {
+                    IdentifierNode *id_node = (IdentifierNode*)ma->target;
+                    SymResult sr = sym_lookup(&cg->sym, id_node->name);
+                    if (sr.found) emit_leer_u24(cg, 1, sr.addr, sr.is_relative);
+                    else visit_expression(cg, ma->target, 1);
+                } else if (is_node(ma->target, NODE_MEMBER_ACCESS)) {
+                    MemberAddrResult mar = get_member_address(cg, ma->target, 1);
+                    if (mar.in_reg) {
+                        if (mar.reg != 1) emit(cg, OP_MOVER, 1, mar.reg, 0, IR_INST_FLAG_B_REGISTER);
+                    } else emit_leer_u24(cg, 1, mar.addr, mar.is_relative);
+                } else visit_expression(cg, ma->target, 1);
+                
+                /* Evaluar argumentos -> reg 2, 3... */
+                emit_call_args_preserved_methods(cg, cn->args, cn->n_args);
+
+                /* Intentar dispatch dinámico (polimorfismo) */
+                if (emit_dynamic_dispatch(cg, obj_type, ma->member, cn, dest_reg, 0)) {
+                    return dest_reg;
+                }
+
+                /* Fallback dispatch estático */
+                int label_id = get_method_label_recursive(cg, obj_type, ma->member);
                 if (label_id >= 0) {
-                    /* Evaluar instancia 'este' -> reg 1 */
-                    if (is_node(ma->target, NODE_IDENTIFIER)) {
-                        IdentifierNode *id_node = (IdentifierNode*)ma->target;
-                        SymResult sr = sym_lookup(&cg->sym, id_node->name);
-                        if (sr.found) {
-                            if (strcmp(id_node->name, "este") == 0) {
-                                emit_leer_u24(cg, 1, sr.addr, sr.is_relative);
-                            } else {
-                                emit(cg, OP_GET_FP, 1, 0, 0, IR_INST_FLAG_A_REGISTER);
-                                emit_sumar_u24(cg, 1, 1, sr.addr);
-                            }
-                        } else {
-                            visit_expression(cg, ma->target, 1);
-                        }
-                    } else if (is_node(ma->target, NODE_MEMBER_ACCESS)) {
-                        MemberAddrResult mar = get_member_address(cg, ma->target, 1);
-                        if (mar.in_reg) {
-                            if (mar.reg != 1) emit(cg, OP_MOVER, 1, mar.reg, 0, IR_INST_FLAG_B_REGISTER);
-                        } else {
-                            emit_leer_u24(cg, 1, mar.addr, mar.is_relative);
-                        }
-                    } else {
-                        visit_expression(cg, ma->target, 1);
-                    }
-                    /* Evaluar argumentos -> reg 2, 3... */
-                    emit_call_args_preserved_methods(cg, cn->args, cn->n_args);
-                    /* Emitir llamada */
                     emit(cg, OP_LLAMAR, 0, 0, 0, IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
                     add_patch(cg, label_id, PATCH_JUMP);
                     emit(cg, OP_MOVER, dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
                     return dest_reg;
-                } else {
-                    /* No es un metodo estatico de clase. ¿Es un campo que pueda contener una funcion? */
-                    size_t off = 0; const char *ft = NULL; size_t fsz = 0;
-                    if (!sym_get_struct_field(&cg->sym, obj_type, ma->member, &off, &ft, &fsz)) {
-                        snprintf(cg->last_error, CODEGEN_ERROR_MAX,
-                                 "Error: el tipo '%s' no tiene un metodo o campo llamado '%s'.",
-                                 obj_type, ma->member);
-                        cg->has_error = 1;
-                        cg->err_line = ma->base.line;
-                        cg->err_col = ma->base.col;
-                        return dest_reg;
-                    }
                 }
             }
+        }
+
+        if (visit_call_sistema(cg, cn, dest_reg)) {
+            if (cg->has_error) return dest_reg;
+            return dest_reg;
         }
 
         /* 2. Caso: Variable de tipo funcion o callee arbitrario */
@@ -5531,9 +5610,7 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
         if (cn->name) {
             label_id = get_func_label(cg, cn->name);
             if (label_id < 0 && cg->current_class_name) {
-                char full_name[256];
-                snprintf(full_name, sizeof(full_name), "%s.%s", cg->current_class_name, cn->name);
-                label_id = get_func_label(cg, full_name);
+                label_id = get_method_label_recursive(cg, cg->current_class_name, cn->name);
                 if (label_id >= 0) is_implicit_este = 1;
             }
         }
@@ -5559,8 +5636,36 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
             if (cn->name) {
                 StructInfo *si = sym_get_struct_info(&cg->sym, cn->name);
                 if (si) {
-                    /* Constructor por defecto: reservar memoria */
+                    /* Constructor: reservar memoria */
                     emit(cg, OP_HEAP_RESERVAR, (uint8_t)dest_reg, (uint8_t)(si->total_size & 0xFF), (uint8_t)((si->total_size >> 8) & 0xFF), IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+                    
+                    if (si->is_class) {
+                        /* Escribir Class ID (hash del nombre) en offset 0 */
+                        const int tmp_id_reg = 120;
+                        emit_load_text_literal_reg(cg, si->name, tmp_id_reg);
+                        emit(cg, OP_ESCRIBIR, (uint8_t)dest_reg, (uint8_t)tmp_id_reg, 0, 
+                             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+                    }
+                    
+                    int init_label = get_method_label_recursive(cg, si->name, "inicializar");
+                    if (init_label >= 0) {
+                        const int obj_ptr_temp = 121;
+                        /* Guardar el objeto en un registro temporal seguro (121) para evitar colision con args (120) */
+                        emit(cg, OP_MOVER, (uint8_t)obj_ptr_temp, (uint8_t)dest_reg, 0, IR_INST_FLAG_B_REGISTER);
+                        
+                        /* El objeto recien creado va al registro 1 (este) */
+                        if (dest_reg != 1) {
+                            emit(cg, OP_MOVER, 1, (uint8_t)dest_reg, 0, IR_INST_FLAG_B_REGISTER);
+                        }
+                        /* Evaluar argumentos -> reg 2, 3... (usan temp_reg 120 internamente) */
+                        emit_call_args_preserved_methods(cg, cn->args, cn->n_args);
+                        /* Emitir llamada */
+                        emit(cg, OP_LLAMAR, 0, 0, 0, IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+                        add_patch(cg, init_label, PATCH_JUMP);
+                        
+                        /* Restaurar el objeto a dest_reg desde nuestro temporal seguro */
+                        emit(cg, OP_MOVER, (uint8_t)dest_reg, (uint8_t)obj_ptr_temp, 0, IR_INST_FLAG_B_REGISTER);
+                    }
                     return dest_reg;
                 }
             }
@@ -5834,10 +5939,31 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
                 if (cn->name) {
                     StructInfo *si = sym_get_struct_info(&cg->sym, cn->name);
                     if (si) {
-                    emit(cg, OP_HEAP_RESERVAR, 1, (uint8_t)(si->total_size & 0xFF), (uint8_t)((si->total_size >> 8) & 0xFF), IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
-                    emit_escribir_u24(cg, 1, r.addr, r.is_relative);
-                    return;
-                }
+                        /* Reservar en registro 1 */
+                        emit(cg, OP_HEAP_RESERVAR, 1, (uint8_t)(si->total_size & 0xFF), (uint8_t)((si->total_size >> 8) & 0xFF), IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+                        
+                        if (si->is_class) {
+                            /* Escribir Class ID (hash del nombre) en offset 0 */
+                            const int tmp_id_reg = 120;
+                            emit_load_text_literal_reg(cg, si->name, tmp_id_reg);
+                            emit(cg, OP_ESCRIBIR, 1, (uint8_t)tmp_id_reg, 0, 
+                                 IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+                        }
+
+                        /* Guardar la direccion en la variable ANTES de la llamada (el constructor puede clobber reg 1) */
+                        emit_escribir_u24(cg, r.addr, 1, r.is_relative);
+
+                        int init_label = get_method_label_recursive(cg, si->name, "inicializar");
+                        if (init_label >= 0) {
+                            /* 'este' ya esta en reg 1. Evaluar argumentos -> reg 2, 3... */
+                            emit_call_args_preserved_methods(cg, cn->args, cn->n_args);
+                            /* Emitir llamada */
+                            emit(cg, OP_LLAMAR, 0, 0, 0, IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+                            add_patch(cg, init_label, PATCH_JUMP);
+                        }
+                        
+                        return;
+                    }
                 }
             }
             /* vec binary op en declaracion: vec3 v = a + b */
@@ -6714,58 +6840,45 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
             /* Caso 1: Llamada a metodo obj.metodo(...) */
             if (cn->callee->type == NODE_MEMBER_ACCESS) {
                 MemberAccessNode *ma = (MemberAccessNode *)cn->callee;
-                const char *obj_type = get_expression_type(cg, ma->target);
-                if (obj_type) {
-                    char full_name[256];
-                    snprintf(full_name, sizeof(full_name), "%s.%s", obj_type, ma->member);
-                    
+            const char *obj_type = get_expression_type(cg, ma->target);
+            if (obj_type) {
+                /* Evaluar instancia 'este' -> reg 1 (queremos su direccion) */
+                if (is_node(ma->target, NODE_IDENTIFIER)) {
+                    IdentifierNode *id_node = (IdentifierNode*)ma->target;
+                    SymResult sr = sym_lookup(&cg->sym, id_node->name);
+                    if (sr.found) emit_leer_u24(cg, 1, sr.addr, sr.is_relative);
+                    else visit_expression(cg, ma->target, 1);
+                } else if (is_node(ma->target, NODE_MEMBER_ACCESS)) {
+                    MemberAddrResult mar = get_member_address(cg, ma->target, 1);
+                    if (mar.in_reg) {
+                        if (mar.reg != 1) emit(cg, OP_MOVER, 1, mar.reg, 0, IR_INST_FLAG_B_REGISTER);
+                    } else emit_leer_u24(cg, 1, mar.addr, mar.is_relative);
+                } else visit_expression(cg, ma->target, 1);
+
+                /* Evaluar argumentos -> reg 2, 3, ... */
+                emit_call_args_preserved_methods(cg, cn->args, cn->n_args);
+
+                /* Intentar dispatch dinámico (polimorfismo) */
+                if (emit_dynamic_dispatch(cg, obj_type, ma->member, cn, 0, 1)) {
+                    return;
+                }
+
+                /* Fallback dispatch estático */
+                int label_id = get_method_label_recursive(cg, obj_type, ma->member);
+                if (label_id >= 0) {
                     int is_priv = 0;
                     if (sym_get_struct_method_visibility(&cg->sym, obj_type, ma->member, &is_priv)) {
                         if (!is_access_allowed(cg, obj_type, is_priv)) {
                             snprintf(cg->last_error, CODEGEN_ERROR_MAX, "Error: el metodo '%s' de la clase '%s' es privado", ma->member, obj_type);
-                            cg->has_error = 1;
-                            cg->err_line = ma->base.line;
-                            cg->err_col = ma->base.col;
+                            cg->has_error = 1; cg->err_line = ma->base.line; cg->err_col = ma->base.col;
                             return;
                         }
                     }
-
-                    int label_id = get_func_label(cg, full_name);
-                    if (label_id >= 0) {
-                        /* 1. Evaluar instancia 'este' -> reg 1 (queremos su direccion) */
-                        if (is_node(ma->target, NODE_IDENTIFIER)) {
-                            IdentifierNode *id_node = (IdentifierNode*)ma->target;
-                            SymResult sr = sym_lookup(&cg->sym, id_node->name);
-                            if (sr.found) {
-                                if (strcmp(id_node->name, "este") == 0) {
-                                    emit_leer_u24(cg, 1, sr.addr, sr.is_relative);
-                                } else {
-                                    emit(cg, OP_GET_FP, 1, 0, 0, IR_INST_FLAG_A_REGISTER);
-                                    emit_sumar_u24(cg, 1, 1, sr.addr);
-                                }
-                            } else {
-                                visit_expression(cg, ma->target, 1);
-                            }
-                        } else if (is_node(ma->target, NODE_MEMBER_ACCESS)) {
-                            MemberAddrResult mar = get_member_address(cg, ma->target, 1);
-                            if (mar.in_reg) {
-                                if (mar.reg != 1) emit(cg, OP_MOVER, 1, mar.reg, 0, IR_INST_FLAG_B_REGISTER);
-                            } else {
-                                emit(cg, OP_GET_FP, 1, 0, 0, IR_INST_FLAG_A_REGISTER);
-                                emit_sumar_u24(cg, 1, 1, mar.addr);
-                            }
-                        } else {
-                            visit_expression(cg, ma->target, 1);
-                        }
-
-                        /* 2. Evaluar argumentos -> reg 2, 3, ... */
-                        emit_call_args_preserved_methods(cg, cn->args, cn->n_args);
-                        /* 3. Emitir llamada */
-                        emit(cg, OP_LLAMAR, 0, 0, 0, IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
-                        add_patch(cg, label_id, PATCH_JUMP);
-                        return;
-                    }
+                    emit(cg, OP_LLAMAR, 0, 0, 0, IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+                    add_patch(cg, label_id, PATCH_JUMP);
+                    return;
                 }
+            }
             }
 
             int prev = cg->expr_allow_func_literal;
@@ -6821,9 +6934,7 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
         if (cn->name) {
             label_id = get_func_label(cg, cn->name);
             if (label_id < 0 && cg->current_class_name) {
-                char full_name[256];
-                snprintf(full_name, sizeof(full_name), "%s.%s", cg->current_class_name, cn->name);
-                label_id = get_func_label(cg, full_name);
+                label_id = get_method_label_recursive(cg, cg->current_class_name, cn->name);
                 if (label_id >= 0) is_implicit_este = 1;
             }
         }
@@ -7077,7 +7188,7 @@ uint8_t *codegen_generate(CodeGen *cg, ASTNode *ast, size_t *out_len) {
             if (sd->extends_name && sd->extends_name[0]) {
                 int er = sym_register_class_extends(&cg->sym, sd->name, sd->extends_name,
                     (const char**)sd->field_types, (const char**)sd->field_names, sd->field_visibilities, sd->n_fields,
-                    masts, mnames, sd->method_visibilities, sd->n_methods, sd->is_exported);
+                    masts, mnames, sd->method_visibilities, sd->n_methods, sd->is_exported, sd->is_clase);
                 if (er == -1) {
                     cg->has_error = 1;
                     cg->err_line = sd->base.line;
@@ -7096,7 +7207,7 @@ uint8_t *codegen_generate(CodeGen *cg, ASTNode *ast, size_t *out_len) {
             } else {
                 sym_register_class(&cg->sym, sd->name, (const char**)sd->field_types,
                                    (const char**)sd->field_names, sd->field_visibilities, sd->n_fields,
-                                   masts, mnames, sd->method_visibilities, sd->n_methods, sd->is_exported);
+                                   masts, mnames, sd->method_visibilities, sd->n_methods, sd->is_exported, sd->is_clase);
             }
             if (mnames) free(mnames);
             if (masts) free(masts);
