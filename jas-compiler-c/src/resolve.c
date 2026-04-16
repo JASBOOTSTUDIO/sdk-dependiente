@@ -42,7 +42,7 @@ static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs)
     if (sd->extends_name && sd->extends_name[0]) {
         int er = sym_register_class_extends(st, sd->name, sd->extends_name,
             (const char **)sd->field_types, (const char **)sd->field_names, sd->field_visibilities, sd->n_fields,
-            masts, mnames, sd->method_visibilities, sd->n_methods, sd->is_exported);
+            masts, mnames, sd->method_visibilities, sd->n_methods, sd->is_exported, sd->is_clase);
         if (er == -1) {
             fprintf(stderr, "Error semantico: la clase/registro '%s' extiende '%s', pero el tipo base no esta registrado.\n",
                     sd->name ? sd->name : "?", sd->extends_name);
@@ -55,7 +55,7 @@ static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs)
     } else {
         sym_register_class(st, sd->name, (const char **)sd->field_types,
                            (const char **)sd->field_names, sd->field_visibilities, sd->n_fields,
-                           masts, mnames, sd->method_visibilities, sd->n_methods, sd->is_exported);
+                           masts, mnames, sd->method_visibilities, sd->n_methods, sd->is_exported, sd->is_clase);
     }
     if (mnames) free(mnames);
     if (masts) free(masts);

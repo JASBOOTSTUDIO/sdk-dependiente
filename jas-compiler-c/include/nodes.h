@@ -119,6 +119,7 @@ typedef struct {
     int *field_visibilities;  /* 0=publico, 1=privado */
     int *method_visibilities; /* 0=publico, 1=privado */
     int is_exported;
+    int is_clase;
 } StructDefNode;
 
 /* 2.3 Expresiones */
