@@ -28,7 +28,7 @@ static size_t type_size(SymbolTable *st, const char *type_name) {
     return 8;
 }
 
-static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs) {
+static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs, int report_errors) {
     if (!node || node->type != NODE_STRUCT_DEF) return;
     StructDefNode *sd = (StructDefNode *)node;
 
@@ -39,17 +39,20 @@ static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs)
         masts[j] = sd->methods[j];
     }
 
-    if (sd->extends_name && sd->extends_name[0]) {
-        int er = sym_register_class_extends(st, sd->name, sd->extends_name,
+    if (sd->n_extends > 0) {
+        int er = sym_register_class_extends(st, sd->name, (const char **)sd->extends_names, sd->n_extends,
             (const char **)sd->field_types, (const char **)sd->field_names, sd->field_visibilities, sd->n_fields,
             masts, mnames, sd->method_visibilities, sd->n_methods, sd->is_exported, sd->is_clase);
-        if (er == -1) {
-            fprintf(stderr, "Error semantico: la clase/registro '%s' extiende '%s', pero el tipo base no esta registrado.\n",
-                    sd->name ? sd->name : "?", sd->extends_name);
-            (*errs)++;
-        } else if (er == -2) {
-            fprintf(stderr, "Error semantico: la clase '%s' redefine el campo de '%s'.\n",
-                    sd->name ? sd->name : "?", sd->extends_name);
+        if (er != 0) {
+            if (report_errors) {
+                if (er == -1) {
+                    fprintf(stderr, "Error semantico: la clase/registro '%s' extiende una base no registrada.\n",
+                            sd->name ? sd->name : "?");
+                } else if (er == -2) {
+                    fprintf(stderr, "Error semantico: la clase '%s' redefine un campo de una de sus bases.\n",
+                            sd->name ? sd->name : "?");
+                }
+            }
             (*errs)++;
         }
     } else {
@@ -61,7 +64,7 @@ static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs)
     if (masts) free(masts);
 
     for (size_t i = 0; i < sd->n_nested_structs; i++) {
-        register_struct_recursive(st, sd->nested_structs[i], errs);
+        register_struct_recursive(st, sd->nested_structs[i], errs, report_errors);
     }
 }
 
@@ -74,9 +77,9 @@ static void resolve_struct_methods_recursive(SymbolTable *st, ASTNode *node) {
         sym_enter_scope(st, 1);
         /* 'este' apunta a la instancia de la clase */
         sym_declare(st, "este", sd->name, 8, 1, 0, NULL);
-        if (sd->extends_name && sd->extends_name[0]) {
-            /* 'padre' apunta a la misma instancia pero con el tipo de la clase base */
-            sym_declare(st, "padre", sd->extends_name, 8, 1, 0, NULL);
+        if (sd->n_extends > 0) {
+            /* 'padre' apunta a la misma instancia pero con el tipo de la primera clase base */
+            sym_declare(st, "padre", sd->extends_names[0], 8, 1, 0, NULL);
         }
         for (size_t k = 0; k < fn->n_params; k++) {
             VarDeclNode *vd = (VarDeclNode *)fn->params[k];
@@ -134,7 +137,7 @@ int resolve_program(ASTNode *ast, SymbolTable *st) {
                 if (sym_get_struct_info(st, sd->name)) continue; // Ya registrado
                 
                 int local_errs = 0;
-                register_struct_recursive(st, g, &local_errs);
+                register_struct_recursive(st, g, &local_errs, 0);
                 if (local_errs == 0) {
                     changed = 1;
                 } else {
@@ -149,7 +152,7 @@ int resolve_program(ASTNode *ast, SymbolTable *st) {
             if (p->globals[i] && p->globals[i]->type == NODE_STRUCT_DEF) {
                 StructDefNode *sd = (StructDefNode*)p->globals[i];
                 if (!sym_get_struct_info(st, sd->name)) {
-                    register_struct_recursive(st, p->globals[i], &resolve_errs);
+                    register_struct_recursive(st, p->globals[i], &resolve_errs, 1);
                 }
             }
         }

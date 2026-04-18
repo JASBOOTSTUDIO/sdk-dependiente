@@ -45,7 +45,10 @@ void ast_free(ASTNode *node) {
         case NODE_STRUCT_DEF: {
             StructDefNode *n = (StructDefNode*)node;
             free_str(n->name);
-            free_str(n->extends_name);
+            for (size_t i = 0; i < n->n_extends; i++) {
+                free_str(n->extends_names[i]);
+            }
+            if (n->extends_names) free(n->extends_names);
             for (size_t i = 0; i < n->n_fields; i++) {
                 free_str(n->field_types[i]);
                 free_str(n->field_names[i]);

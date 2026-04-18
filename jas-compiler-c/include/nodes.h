@@ -108,7 +108,8 @@ typedef struct {
 typedef struct {
     ASTNode base;
     char *name;
-    char *extends_name; /* NULL si no hay `extiende Base`; solo clases/registros con herencia */
+    char **extends_names; /* NULL si no hay `extiende Base1, Base2...` */
+    size_t n_extends;
     char **field_types;
     char **field_names;
     size_t n_fields;

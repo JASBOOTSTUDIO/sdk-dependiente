@@ -863,7 +863,18 @@ static int vm_text_resolve_info(VM* vm, uint32_t id, char* scratch, size_t scrat
 
 static const char* vm_text_cache_get(VM* vm, uint32_t id) {
     VMTextCacheEntry* e = vm_text_cache_find(vm, id);
-    if (!e) return NULL;
+    if (!e) {
+#ifdef JASBOOT_LANG_INTEGRATION
+        /* Si no esta en cache, podria ser un texto de la JMN */
+        if (vm->mem_neuronal) {
+            static char jmn_scratch[1024];
+            if (jmn_obtener_texto(vm->mem_neuronal, id, jmn_scratch, sizeof(jmn_scratch)) >= 0) {
+                return jmn_scratch;
+            }
+        }
+#endif
+        return NULL;
+    }
     if (e->kind == VM_TEXT_RAW) return e->text;
     if (e->kind == VM_TEXT_CONCAT && !e->text) {
         char* flat = (char*)malloc(e->text_len + 1);
@@ -1246,6 +1257,7 @@ VM* vm_create(void) {
     vm->fp_stack_ptr = 0;
     vm->fp = 0x4000; // Stack starts at 16KB (globals at 2KB)
     vm->sp = 0x4000;
+    vm->heap_top = 0x20000; // Heap allocation starts at 128KB
     vm->pc = 0;
     vm->running = 0;
     vm->exit_code = 0;
@@ -2989,7 +3001,7 @@ int vm_step(VM* vm) {
         }
 
         case OP_MOVER_U24: {
-            uint32_t val = (uint32_t)inst.operand_b | ((uint32_t)inst.operand_c << 8) | ((uint32_t)inst.flags << 16);
+            uint32_t val = (uint32_t)inst.operand_b | ((uint32_t)inst.operand_c << 8) | (((uint32_t)inst.flags) << 16);
             vm_set_register(vm, inst.operand_a, (uint64_t)val);
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
@@ -3011,10 +3023,39 @@ int vm_step(VM* vm) {
                 addr += vm->fp;
             }
             
-            if (addr + 8 <= vm->memory_size) {
-                uint64_t value = *(uint64_t*)(vm->memory + addr);
-                vm_set_register(vm, inst.operand_a, value);
+            /* PROTECCIÓN DE MEMORIA MEJORADA: 
+               Si la dirección está fuera de los límites de la memoria física de la VM. */
+            if (addr + 8 > vm->memory_size && addr != 0xFFFFFFFFFFFFFFFFULL) {
+                char trymsg[512];
+                uint32_t hash_id = (uint32_t)addr;
+                
+                // 1. ¿Es un acceso a NULO?
+                if (addr < 1024) {
+                    snprintf(trymsg, sizeof trymsg, "[ERROR VM] Violacion de acceso en OP_LEER: Intento de leer desde una direccion cercana a NULO (0x%08llX). Probablemente estas accediendo a un campo de un objeto no inicializado.", (unsigned long long)addr);
+                } else {
+                    // 2. ¿Es un hash de texto usado como puntero?
+                    const char* txt = vm_text_cache_get(vm, hash_id);
+                    if (!txt) txt = vm_text_cache_get(vm, hash_id & ~0x80000000u);
+                    
+                    if (txt) {
+                        snprintf(trymsg, sizeof trymsg, "[ERROR VM] Corrupcion de contexto: Se intento usar el texto '%s' (hash 0x%08X) como una direccion de memoria en OP_LEER. Esto ocurre al intentar acceder a un miembro de algo que no es un objeto.", txt, hash_id);
+                    } else {
+                        // 3. Error de limites general
+                        snprintf(trymsg, sizeof trymsg, "[ERROR VM] Violacion de acceso en OP_LEER: direccion 0x%08llX fuera de limites (0-%zu).", (unsigned long long)addr, vm->memory_size);
+                    }
+                }
+                
+                if (vm_try_catch_or_abort(vm, trymsg)) return 0;
+                fprintf(stderr, "%s\n", trymsg);
+                vm->running = 0;
+                vm->exit_code = 1;
+                return 0;
             }
+
+            // Lectura segura
+            uint64_t value = *(uint64_t*)(vm->memory + addr);
+            vm_set_register(vm, inst.operand_a, value);
+            
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
@@ -3041,9 +3082,38 @@ int vm_step(VM* vm) {
                 addr += vm->fp;
             }
             
-            if (addr + 8 <= vm->memory_size) {
-                 *(uint64_t*)(vm->memory + addr) = b_val;
+            /* PROTECCIÓN DE MEMORIA MEJORADA: 
+               Si la dirección está fuera de los límites de la memoria física de la VM. */
+            if (addr + 8 > vm->memory_size && addr != 0xFFFFFFFFFFFFFFFFULL) {
+                char trymsg[512];
+                uint32_t hash_id = (uint32_t)addr;
+                
+                // 1. ¿Es un acceso a NULO?
+                if (addr < 1024) {
+                    snprintf(trymsg, sizeof trymsg, "[ERROR VM] Violacion de acceso en OP_ESCRIBIR: Intento de escribir en una direccion cercana a NULO (0x%08llX). Probablemente estas intentando asignar un campo a un objeto no inicializado.", (unsigned long long)addr);
+                } else {
+                    // 2. ¿Es un hash de texto usado como puntero?
+                    const char* txt = vm_text_cache_get(vm, hash_id);
+                    if (!txt) txt = vm_text_cache_get(vm, hash_id & ~0x80000000u);
+                    
+                    if (txt) {
+                        snprintf(trymsg, sizeof trymsg, "[ERROR VM] Corrupcion de contexto: Se intento usar el texto '%s' (hash 0x%08X) como una direccion de memoria en OP_ESCRIBIR. Esto ocurre al intentar asignar un miembro a algo que no es un objeto.", txt, hash_id);
+                    } else {
+                        // 3. Error de limites general
+                        snprintf(trymsg, sizeof trymsg, "[ERROR VM] Violacion de acceso en OP_ESCRIBIR: direccion 0x%08llX fuera de limites (0-%zu).", (unsigned long long)addr, vm->memory_size);
+                    }
+                }
+                
+                if (vm_try_catch_or_abort(vm, trymsg)) return 0;
+                fprintf(stderr, "%s\n", trymsg);
+                vm->running = 0;
+                vm->exit_code = 1;
+                return 0;
             }
+
+            // Escritura segura
+            *(uint64_t*)(vm->memory + addr) = b_val;
+            
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
@@ -3585,17 +3655,16 @@ int vm_step(VM* vm) {
             if ((inst.flags & IR_INST_FLAG_B_IMMEDIATE) && (inst.flags & IR_INST_FLAG_C_IMMEDIATE))
                 bytes |= (uint64_t)inst.operand_c << 8;
             
-            /* Allocate from 2MB mark in vm->memory */
-            static uint32_t heap_top = 0x200000;
-            if (vm->pc == 0) heap_top = 0x200000;
-            
-            uint32_t addr = heap_top;
+            uint32_t addr = vm->heap_top;
             if (addr + bytes <= vm->memory_size) {
                 memset(vm->memory + addr, 0, (size_t)bytes);
+                vm->heap_top += (uint32_t)bytes;
+                vm->heap_top = (vm->heap_top + 7) & ~7; /* Align */
+            } else {
+                /* Error: heap overflow or memory size too small */
+                fprintf(stderr, "[ERROR VM] Heap overflow o memoria insuficiente para reserva de %llu bytes en 0x%08x (limite %zu)\n", (unsigned long long)bytes, addr, vm->memory_size);
+                addr = 0;
             }
-            
-            heap_top += (uint32_t)bytes;
-            heap_top = (heap_top + 7) & ~7; /* Align */
             
             vm_set_register(vm, inst.operand_a, (uint64_t)addr);
             vm->pc += IR_INSTRUCTION_SIZE;
@@ -8266,7 +8335,12 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
         uint8_t op_b = code_ptr[3];
         uint8_t op_c = code_ptr[4];
         
-        /* printf("[VM STEP] pc=0x%08llX opcode=0x%02X flags=0x%02X a=%d b=%d c=%d\n", (unsigned long long)vm->pc, opcode, flags, op_a, op_b, op_c); */
+        // Debugging SIGSEGV mejorado
+        if (getenv("JASBOOT_TRACE_CRASH")) {
+            fprintf(stderr, "[VM-TRACE] PC: 0x%04x, OP: 0x%02x, A: %d, B: %d, C: %d, Flags: 0x%02x\n", 
+                    (unsigned int)vm->pc, opcode, op_a, op_b, op_c, flags);
+            fflush(stderr);
+        }
 
         uint64_t a_val = 0, b_val = 0, c_val = 0;
         if (opcode != OP_DEBUG_LINE) {
@@ -8409,14 +8483,18 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
                 }
                 if (flags & IR_INST_FLAG_RELATIVE) addr += vm->fp;
                 if (addr + 8 <= vm->memory_size) {
-                    uint64_t val = *(uint64_t*)(vm->memory + addr);
-                    STORE_REG_FAST(op_a, val);
-                    /* printf("[VM READ] memory[0x%08llX] = 0x%016llX\n", (unsigned long long)addr, (unsigned long long)val); */
-                } else if (addr != 0) {
-                    STORE_REG_FAST(op_a, *(uint64_t*)(uintptr_t)addr);
-                }
-                vm->pc += IR_INSTRUCTION_SIZE;
-                break;
+                uint64_t val = *(uint64_t*)(vm->memory + addr);
+                STORE_REG_FAST(op_a, val);
+                /* printf("[VM READ] memory[0x%08llX] = 0x%016llX\n", (unsigned long long)addr, (unsigned long long)val); */
+            } else {
+                fprintf(stderr, "[ERROR VM] Violacion de acceso en OP_LEER: direccion 0x%llX fuera de limites (0-%llX).\n", 
+                        (unsigned long long)addr, (unsigned long long)vm->memory_size);
+                vm->running = 0;
+                vm->exit_code = 11;
+                return 11;
+            }
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
             }
             case OP_GET_FP:
                 STORE_REG_FAST(op_a, (uint64_t)vm->fp);
@@ -8430,8 +8508,12 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
                 if (flags & IR_INST_FLAG_RELATIVE) addr += vm->fp;
                 if (addr + 8 <= vm->memory_size) {
                     *(uint64_t*)(vm->memory + addr) = b_val;
-                } else if (addr != 0) {
-                    *(uint64_t*)(uintptr_t)addr = b_val;
+                } else {
+                    fprintf(stderr, "[ERROR VM] Violacion de acceso en OP_ESCRIBIR: direccion 0x%llX fuera de limites (0-%llX).\n", 
+                            (unsigned long long)addr, (unsigned long long)vm->memory_size);
+                    vm->running = 0;
+                    vm->exit_code = 11;
+                    return 11;
                 }
                 vm->pc += IR_INSTRUCTION_SIZE;
                 break;

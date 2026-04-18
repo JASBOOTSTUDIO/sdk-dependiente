@@ -1735,7 +1735,8 @@ int do_compile(const char *in_path, const char *out_path, char **err_msg) {
     }
 
     SymbolTable sym;
-    sym_init(&sym);
+    sym_init_global(&sym);
+    sym.is_global = 1;
     if (resolve_program(ast, &sym) > 0) {
         fprintf(stderr, "%sCompilacion fallida: error al registrar clases/registros (herencia o orden de tipos).%s\n",
                 ANSI_RED, ANSI_RESET);

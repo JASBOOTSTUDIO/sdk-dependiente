@@ -123,6 +123,7 @@ typedef struct {
     size_t pc;                              // Program counter (offset en bytes)
     uint32_t fp;                            // Frame Pointer (offset en memoria de datos)
     uint32_t sp;                            // Stack Pointer (offset en memoria de datos)
+    uint32_t heap_top;                      // Heap Pointer (inicio de reserva dinámica)
     uint32_t fp_stack[VM_MAX_RECURSION];    // Stack de Frame Pointers para recursividad
     uint32_t fp_stack_ptr;                  // Pointer del stack de FPs
     IRFile* ir;                             // Archivo IR cargado

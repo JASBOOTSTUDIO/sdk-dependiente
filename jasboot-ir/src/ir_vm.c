@@ -3,9 +3,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 
 /* Persistencia JMN: cerrar memoria al salir (incl. Ctrl+C, exit rápido) */
 static VM* g_vm_for_atexit = NULL;
+
+// Manejador de señales para errores claros
+void manejador_segmentacion(int sig) {
+    fprintf(stderr, "\n[ERROR CRITICO VM] Violacion de acceso (Segmentation Fault).\n");
+    fprintf(stderr, "Causa probable: Acceso a objeto nulo o memoria corrompida en el script Jasboot.\n");
+    exit(sig);
+}
 
 static void ir_vm_atexit_persist(void) {
     if (g_vm_for_atexit) {
@@ -15,6 +23,7 @@ static void ir_vm_atexit_persist(void) {
 }
 
 int main(int argc, char** argv) {
+    signal(SIGSEGV, manejador_segmentacion);
     atexit(ir_vm_atexit_persist);
     jasboot_init_console();
     if (argc < 2) {

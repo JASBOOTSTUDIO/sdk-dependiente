@@ -229,6 +229,19 @@ static int validate_user_defined_name_tok(Parser *p, const Token *tok) {
     }
     if (!tok->value.str) return 1;
     const char *s = tok->value.str;
+
+    if (strcmp(s, "resultado") == 0) {
+        if (p->source_path && p->source_path[0])
+            set_error_at(p, tok->line, tok->column,
+                      "Archivo %s, linea %d, columna %d: 'resultado' es una palabra reservada del lenguaje (simbolo magico para resultados de operaciones). No puede ser declarada ni usada como nombre de funcion.",
+                      p->source_path, tok->line, tok->column);
+        else
+            set_error_at(p, tok->line, tok->column,
+                      "linea %d, columna %d: 'resultado' es una palabra reservada del lenguaje (simbolo magico para resultados de operaciones). No puede ser declarada ni usada como nombre de funcion.",
+                      tok->line, tok->column);
+        return 0;
+    }
+
     if (tok->type == TOK_KEYWORD && !keyword_ok_as_user_identifier(s)) {
         if (p->source_path && p->source_path[0])
             set_error_at(p, tok->line, tok->column,
@@ -1963,6 +1976,11 @@ static ASTNode *parse_primary(Parser *p) {
         n->base.line = t->line;
         n->base.col = t->column;
         return (ASTNode*)n;
+    }
+    if (t->type == TOK_KEYWORD && t->value.str && strcmp(t->value.str, "resultado") == 0) {
+        const char *name = strdup(t->value.str);
+        advance(p);
+        return make_identifier(name, t->line, t->column);
     }
     if (t->type == TOK_KEYWORD && t->value.str && !keyword_ok_as_user_identifier(t->value.str)) {
         // En jasboot, "es", "mayor", "menor", "que" son parte de operadores compuestos y podrian llegar aqui.
@@ -4180,7 +4198,7 @@ static ASTNode *parse_statement(Parser *p) {
     /* Identifier o keyword que puede ser declaración TYPE ID o assignment/call */
         if ((t->type == TOK_IDENTIFIER || t->type == TOK_KEYWORD) && t->value.str) {
         const Token *nxt = peek(p, 1);
-        if (nxt && nxt->type == TOK_IDENTIFIER && nxt->value.str) {
+        if (nxt && (nxt->type == TOK_IDENTIFIER || nxt->type == TOK_KEYWORD) && nxt->value.str) {
             /* Posible TYPE ID = expr */
             if (is_keyword(t->value.str, strlen(t->value.str)) &&
                 (strcmp(t->value.str, "entero") == 0 || strcmp(t->value.str, "texto") == 0 ||
@@ -4619,17 +4637,31 @@ static ASTNode *parse_struct_body(Parser *p, int is_clase, int is_exported) {
     if (!validate_user_defined_name_tok(p, nt)) return NULL;
     advance(p);
     char *name = nt && nt->value.str ? strdup(nt->value.str) : NULL;
-    char *extends_name = NULL;
+    char **extends_names = NULL;
+    size_t n_extends = 0;
     if (peek(p, 0) && peek(p, 0)->type == TOK_KEYWORD && peek(p, 0)->value.str &&
         strcmp(peek(p, 0)->value.str, "extiende") == 0) {
         advance(p);
-        const Token *base_tok = peek(p, 0);
-        if (!validate_user_defined_name_tok(p, base_tok)) {
-            free(name);
-            return NULL;
+        while (1) {
+            const Token *base_tok = peek(p, 0);
+            if (!validate_user_defined_name_tok(p, base_tok)) {
+                free(name);
+                for (size_t i = 0; i < n_extends; i++) free(extends_names[i]);
+                free(extends_names);
+                return NULL;
+            }
+            char *base_name = base_tok && base_tok->value.str ? strdup(base_tok->value.str) : NULL;
+            extends_names = realloc(extends_names, (n_extends + 1) * sizeof(char *));
+            extends_names[n_extends++] = base_name;
+            advance(p);
+            
+            if (peek(p, 0) && peek(p, 0)->type == TOK_OPERATOR && peek(p, 0)->value.str &&
+                strcmp(peek(p, 0)->value.str, ",") == 0) {
+                advance(p);
+            } else {
+                break;
+            }
         }
-        extends_name = base_tok && base_tok->value.str ? strdup(base_tok->value.str) : NULL;
-        advance(p);
     }
     char **ft = NULL, **fn = NULL;
     int *fv = NULL;
@@ -4775,7 +4807,8 @@ static ASTNode *parse_struct_body(Parser *p, int is_clase, int is_exported) {
     sn->base.line = nt ? nt->line : 0;
     sn->base.col = nt ? nt->column : 0;
     sn->name = name;
-    sn->extends_name = extends_name;
+    sn->extends_names = extends_names;
+    sn->n_extends = n_extends;
     sn->field_types = ft;
     sn->field_names = fn;
     sn->field_visibilities = fv;
@@ -4792,7 +4825,9 @@ parse_struct_body_fail:
     free(ft); free(fn); free(fv);
     for (size_t i = 0; i < nm; i++) ast_free(methods[i]);
     free(methods); free(mv);
-    free(name); free(extends_name);
+    free(name);
+    for (size_t i = 0; i < n_extends; i++) free(extends_names[i]);
+    free(extends_names);
     return NULL;
 }
 
