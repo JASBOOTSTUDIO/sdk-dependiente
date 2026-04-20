@@ -32,7 +32,7 @@ void sym_init_global(SymbolTable *st) {
     /* Simbolo magico para resultados de operaciones (JMN, etc.) 
        Ahora quedara en la direccion 0x0800 global para evitar conflictos con strings. */
     st->next_global_offset = 0x0800;
-    sym_declare(st, "resultado", "entero", 8, 0, 0, NULL);
+    sym_declare(st, "resultado", "elemento", 8, 0, 0, NULL);
     
     /* Reajustar el offset para el resto de globales a 0x0808 para mantener compatibilidad */
     st->next_global_offset = 0x0808;
