@@ -128,13 +128,22 @@
 #define OP_MEM_LISTA_AGREGAR 0xB1
 #define OP_MEM_LISTA_OBTENER 0xB2
 #define OP_MEM_LISTA_TAMANO  0xB3
-#define OP_MEM_MAPA_CREAR    0x61
-#define OP_MEM_MAPA_PONER    0x62
+#define OP_MEM_ULTIMA_PALABRA   0xD4
+#define OP_MEM_TERMINA_CON      0xD5
+#define OP_MEM_ULTIMA_SILABA    0xD6
+
+/* Búsqueda introspectiva */
+#define OP_MEM_BUSCAR_INTROSPECTIVA 0xCC
+#define OP_MEM_BUSCAR_INTROSPECTIVA_LISTA 0x09     /* A <- lista_id con IDs; B=termino_id, C=max_resultados */
+#define OP_MEM_BUSCAR_INTROSPECTIVA_CS 0x0A        /* A <- primer ID; B=termino_id, C=case_sensitive(0/1) */
+#define OP_MEM_BUSCAR_INTROSPECTIVA_DETALLADA 0x0B /* A <- lista_id con metadata; B=termino, C=max|(cs<<8) */
 #define OP_MEM_MAPA_OBTENER  0x63
 #define OP_MEM_MAPA_BORRAR   0xE3 /* A: map_id, B: key_id (penalizar se usa para borrar en mapas) */
 #define OP_MEM_MAPA_TAMANO   0x7E /* A <- numero de entradas (B: map_id reg) */
 #define OP_MEM_MAPA_CONTIENE 0x08 /* A <- 1 si clave C existe en mapa B, else 0 */
 
+#define OP_MEM_MAPA_CREAR    0x61
+#define OP_MEM_MAPA_PONER    0x62
 #define OP_IR             0x40
 #define OP_SI             0x41
 #define OP_LLAMAR         0x42

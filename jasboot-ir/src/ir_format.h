@@ -277,9 +277,12 @@ typedef enum {
     OP_MEM_BUSCAR_ASOCIADOS = 0xC9,   // A <- mejor asociado de B (tipo C); umbral 0.1, prof 2
     OP_MEM_BUSCAR_ASOCIADOS_LISTA = 0xCA, // A <- lista con top-K ids asociados a B; C = tipo|(K<<8)
     OP_MEM_OBTENER_VALOR = 0xCB,      // A = valor en clave B (recordar); tipo ASOCIACION; si no hay, A=B
-    OP_MEM_DECAE_CONEXIONES = 0xCC,   // Decaimiento global; A=reg ok; B,C inm opcional factor%/1000‰ umbral
-    OP_MEM_PROPAGAR_ACTIVACION = 0xCD, // A <- mejor id por propagación; B=origen, C=tipo|(K<<8)|(prof<<16)
-    OP_MEM_RESOLVER_CONFLICTOS = 0xCE, // A <- id_ganador; B=origen, C=tipo; cuando 2+ candidatos con peso similar
+    OP_MEM_BUSCAR_INTROSPECTIVA = 0xCC, // A <- primer ID que contiene texto B (case insensitive)
+    OP_MEM_BUSCAR_INTROSPECTIVA_LISTA = 0x09, // A <- lista_id con IDs; B=termino_id, C=max_resultados
+    OP_MEM_BUSCAR_INTROSPECTIVA_CS = 0x0A, // A <- primer ID; B=termino_id, C=case_sensitive(0/1)
+    OP_MEM_BUSCAR_INTROSPECTIVA_DETALLADA = 0x0B, // A <- lista_id con metadata; B=termino, C=max|(cs<<8)
+    OP_MEM_DECAE_CONEXIONES = 0xCD,   // Decaimiento global; A=reg ok; B,C inm opcional factor%/1000‰ umbral
+    OP_MEM_PROPAGAR_ACTIVACION = 0xCE, // A <- mejor id por propagación; B=origen, C=tipo|(K<<8)|(prof<<16)
     OP_STR_EXTRAER_ANTES_REG = 0xD8,   // Extraer (regs: A=frase, B=patron) -> C=dest_reg
     OP_STR_EXTRAER_DESPUES_REG = 0xD9, // Extraer (regs: A=frase, B=patron) -> C=dest_reg
     OP_STR_CONCATENAR = 0xD2,        // Concatenar A y B en destino

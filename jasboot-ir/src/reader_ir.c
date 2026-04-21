@@ -337,9 +337,12 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != OP_MEM_BUSCAR_ASOCIADOS &&
             inst.opcode != OP_MEM_BUSCAR_ASOCIADOS_LISTA &&
             inst.opcode != OP_MEM_OBTENER_VALOR &&
+            inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA &&
+            inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA_LISTA &&
+            inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA_CS &&
+            inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA_DETALLADA &&
             inst.opcode != OP_MEM_DECAE_CONEXIONES &&
             inst.opcode != OP_MEM_PROPAGAR_ACTIVACION &&
-            inst.opcode != OP_MEM_RESOLVER_CONFLICTOS &&
             inst.opcode != OP_MEM_REGISTRAR_PATRON &&
             inst.opcode != OP_MEM_OBTENER_RELACION &&
             inst.opcode != OP_MEM_IMPRIMIR_ID &&

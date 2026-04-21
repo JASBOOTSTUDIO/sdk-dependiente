@@ -104,6 +104,7 @@ static void emit(CodeGen *cg, uint8_t op, uint8_t a, uint8_t b, uint8_t c, uint8
 static int new_label(CodeGen *cg);
 static void mark_label(CodeGen *cg, int id);
 static void add_patch(CodeGen *cg, int label_id, int type);
+static void emit_jump_if_nonzero(CodeGen *cg, uint8_t cond_reg, int label_id);
 static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg);
 static void emit_call_args_preserved(CodeGen *cg, ASTNode **args, size_t n_args);
 static void visit_statement(CodeGen *cg, ASTNode *node);
@@ -659,8 +660,7 @@ static int try_emit_collapsed_invariant_while(CodeGen *cg, WhileNode *wn) {
     int end_id = new_label(cg);
     int cond_reg = visit_expression(cg, wn->condition, 1);
     emit(cg, OP_CMP_EQ, 2, cond_reg, 0, IR_INST_FLAG_C_IMMEDIATE);
-    emit(cg, OP_SI, 2, 0, 0, IR_INST_FLAG_A_REGISTER);
-    add_patch(cg, end_id, PATCH_SI);
+    emit_jump_if_nonzero(cg, 2, end_id);
 
     visit_statement(cg, body->statements[0]);
     if (cg->has_error) return 1;
@@ -1528,6 +1528,28 @@ static void add_patch(CodeGen *cg, int label_id, int type) {
     cg->n_patches++;
 }
 
+/*
+ * OP_SI solo admite 16 bits de destino inmediato. Para programas grandes
+ * (como aurora-ia) eso truncaba el salto y enviaba la ejecucion a codigo
+ * incorrecto. Emitimos un trampolin local y delegamos el salto largo a OP_IR.
+ */
+static void emit_jump_if_nonzero(CodeGen *cg, uint8_t cond_reg, int label_id) {
+    int trampoline_id = new_label(cg);
+    int continue_id = new_label(cg);
+
+    emit(cg, OP_SI, cond_reg, 0, 0, IR_INST_FLAG_A_REGISTER);
+    add_patch(cg, trampoline_id, PATCH_SI);
+
+    emit(cg, OP_IR, 0, 0, 0, 0);
+    add_patch(cg, continue_id, PATCH_JUMP);
+
+    mark_label(cg, trampoline_id);
+    emit(cg, OP_IR, 0, 0, 0, 0);
+    add_patch(cg, label_id, PATCH_JUMP);
+
+    mark_label(cg, continue_id);
+}
+
 static int is_builtin_type(const char *t) {
     if (!t) return 0;
     return (strcmp(t, "entero") == 0 || strcmp(t, "flotante") == 0 ||
@@ -1971,8 +1993,7 @@ static void emit_imprimir_texto_reg_o_indefinido(CodeGen *cg, int txt_reg) {
     int lbl_indef = new_label(cg);
     int lbl_end = new_label(cg);
     emit(cg, OP_CMP_EQ, CG_STRUCT_COND_TMP, (uint8_t)txt_reg, 0, IR_INST_FLAG_C_IMMEDIATE);
-    emit(cg, OP_SI, CG_STRUCT_COND_TMP, 0, 0, IR_INST_FLAG_A_REGISTER);
-    add_patch(cg, lbl_indef, PATCH_SI);
+    emit_jump_if_nonzero(cg, CG_STRUCT_COND_TMP, lbl_indef);
     emit(cg, OP_IMPRIMIR_TEXTO, (uint8_t)txt_reg, 0, 0, IR_INST_FLAG_A_REGISTER);
     emit(cg, OP_IR, 0, 0, 0, 0);
     add_patch(cg, lbl_end, PATCH_JUMP);
@@ -1988,8 +2009,7 @@ static void emit_concat_texto_reg_o_indefinido(CodeGen *cg, int acc_reg, int txt
     int lbl_end = new_label(cg);
     int frag = CG_STRUCT_STR_FRAG;
     emit(cg, OP_CMP_EQ, CG_STRUCT_COND_TMP, (uint8_t)txt_reg, 0, IR_INST_FLAG_C_IMMEDIATE);
-    emit(cg, OP_SI, CG_STRUCT_COND_TMP, 0, 0, IR_INST_FLAG_A_REGISTER);
-    add_patch(cg, lbl_indef, PATCH_SI);
+    emit_jump_if_nonzero(cg, CG_STRUCT_COND_TMP, lbl_indef);
     emit_str_concat_regs(cg, acc_reg, txt_reg);
     emit(cg, OP_IR, 0, 0, 0, 0);
     add_patch(cg, lbl_end, PATCH_JUMP);
@@ -2030,8 +2050,7 @@ static void emit_imprimir_struct_repr(CodeGen *cg, const char *struct_name, Memb
                 int lbl_indef = new_label(cg);
                 int lbl_end = new_label(cg);
                 emit(cg, OP_CMP_EQ, CG_STRUCT_COND_TMP, CG_STRUCT_VAL_TMP, 0, IR_INST_FLAG_C_IMMEDIATE);
-                emit(cg, OP_SI, CG_STRUCT_COND_TMP, 0, 0, IR_INST_FLAG_A_REGISTER);
-                add_patch(cg, lbl_indef, PATCH_SI);
+                emit_jump_if_nonzero(cg, CG_STRUCT_COND_TMP, lbl_indef);
                 emit(cg, OP_STR_DESDE_CODIGO, CG_STRUCT_VAL_TMP, CG_STRUCT_VAL_TMP, 0,
                      IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
                 emit(cg, OP_IMPRIMIR_TEXTO, CG_STRUCT_VAL_TMP, 0, 0, IR_INST_FLAG_A_REGISTER);
@@ -2109,8 +2128,7 @@ static void emit_format_struct_string_reg(CodeGen *cg, const char *struct_name, 
                 int lbl_indef = new_label(cg);
                 int lbl_end = new_label(cg);
                 emit(cg, OP_CMP_EQ, CG_STRUCT_COND_TMP, CG_STRUCT_VAL_TMP, 0, IR_INST_FLAG_C_IMMEDIATE);
-                emit(cg, OP_SI, CG_STRUCT_COND_TMP, 0, 0, IR_INST_FLAG_A_REGISTER);
-                add_patch(cg, lbl_indef, PATCH_SI);
+                emit_jump_if_nonzero(cg, CG_STRUCT_COND_TMP, lbl_indef);
                 emit(cg, OP_STR_DESDE_CODIGO, frag, CG_STRUCT_VAL_TMP, 0,
                      IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
                 emit_str_concat_regs(cg, acc_reg, frag);
@@ -2199,8 +2217,7 @@ static int emit_dynamic_dispatch(CodeGen *cg, const char *obj_type, const char *
                 emit_load_str_hash_in_reg(cg, off, match_reg);
                 emit(cg, OP_CMP_EQ, (uint8_t)match_reg, (uint8_t)class_id_reg, (uint8_t)match_reg, 0);
                 emit(cg, OP_CMP_EQ, (uint8_t)match_reg, (uint8_t)match_reg, 0, IR_INST_FLAG_C_IMMEDIATE);
-                emit(cg, OP_SI, (uint8_t)match_reg, 0, 0, IR_INST_FLAG_A_REGISTER);
-                add_patch(cg, next_case, PATCH_SI);
+                emit_jump_if_nonzero(cg, (uint8_t)match_reg, next_case);
                 emit(cg, OP_LLAMAR, 0, 0, 0, IR_INST_FLAG_A_IMMEDIATE | IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
                 add_patch(cg, label_id, PATCH_JUMP);
                 if (!is_statement) emit(cg, OP_MOVER, dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
@@ -3566,7 +3583,131 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         emit(cg, OP_MOVER, (uint8_t)dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
         return 1;
     }
-    if (strcmp(name, "procesar_texto") == 0) {
+    if (strcmp(name, "buscar_en_memoria") == 0 || strcmp(name, "buscar_introspectiva") == 0) {
+        // Búsqueda introspectiva: busca texto dentro de claves y valores de conceptos JMN
+        if (!ARG0) return 0;
+        // Cargar el texto a buscar
+        if (is_node(ARG0, NODE_LITERAL) && ((LiteralNode*)ARG0)->type_name && strcmp(((LiteralNode*)ARG0)->type_name, "texto") == 0) {
+            size_t off = add_string(cg, ((LiteralNode*)ARG0)->value.str ? ((LiteralNode*)ARG0)->value.str : "");
+            emit(cg, OP_LOAD_STR_HASH, 1, off & 0xFF, (off >> 8) & 0xFF, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+        } else {
+            visit_expression(cg, ARG0, 1);
+        }
+        // Llamar al opcode de búsqueda introspectiva (retorna ID del primer concepto que contiene el texto)
+        emit(cg, OP_MEM_BUSCAR_INTROSPECTIVA, (uint8_t)dest_reg, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        // Convertir ID a texto para que 'resultado' tenga el texto del concepto encontrado
+        emit(cg, OP_ID_A_TEXTO, (uint8_t)dest_reg, (uint8_t)dest_reg, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        codegen_emit_write_resultado(cg, (uint8_t)dest_reg);
+        return 1;
+    }
+    if (strcmp(name, "buscar_en_memoria_lista") == 0) {
+        // Búsqueda introspectiva que devuelve lista de IDs
+        // Argumentos: termino, max_resultados
+        if (cn->n_args < 2) return 0;
+        
+        // Cargar término de búsqueda en reg 10
+        if (is_node(ARG0, NODE_LITERAL) && ((LiteralNode*)ARG0)->type_name && strcmp(((LiteralNode*)ARG0)->type_name, "texto") == 0) {
+            size_t off = add_string(cg, ((LiteralNode*)ARG0)->value.str ? ((LiteralNode*)ARG0)->value.str : "");
+            emit(cg, OP_LOAD_STR_HASH, 10, off & 0xFF, (off >> 8) & 0xFF, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+        } else {
+            visit_expression(cg, ARG0, 10);
+        }
+        
+        // Cargar max_resultados en reg 11 (default 10 si no se especifica)
+        if (ARG1 && is_node(ARG1, NODE_LITERAL) && ((LiteralNode*)ARG1)->type_name && strcmp(((LiteralNode*)ARG1)->type_name, "entero") == 0) {
+            int64_t max_val = ((LiteralNode*)ARG1)->value.i;
+            if (max_val < 1) max_val = 1;
+            if (max_val > 100) max_val = 100;
+            emit(cg, OP_MOVER, 11, (uint8_t)(max_val & 0xFF), 0, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+        } else if (ARG1) {
+            visit_expression(cg, ARG1, 11);
+        } else {
+            emit(cg, OP_MOVER, 11, 10, 0, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+        }
+        
+        // Llamar al opcode que retorna una lista de IDs
+        // A <- lista_id con IDs; B=termino_id, C=max_resultados
+        emit(cg, OP_MEM_BUSCAR_INTROSPECTIVA_LISTA, 1, 10, 11, 
+             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+        codegen_emit_write_resultado(cg, 1);
+        emit(cg, OP_MOVER, (uint8_t)dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "buscar_en_memoria_cs") == 0) {
+        // Búsqueda introspectiva con control de case sensitive
+        // Argumentos: termino, case_sensitive (0 o 1)
+        if (cn->n_args < 2) return 0;
+        
+        // Cargar término de búsqueda en reg 10
+        if (is_node(ARG0, NODE_LITERAL) && ((LiteralNode*)ARG0)->type_name && strcmp(((LiteralNode*)ARG0)->type_name, "texto") == 0) {
+            size_t off = add_string(cg, ((LiteralNode*)ARG0)->value.str ? ((LiteralNode*)ARG0)->value.str : "");
+            emit(cg, OP_LOAD_STR_HASH, 10, off & 0xFF, (off >> 8) & 0xFF, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+        } else {
+            visit_expression(cg, ARG0, 10);
+        }
+        
+        // Cargar case_sensitive en reg 11 (0 o 1)
+        if (ARG1 && is_node(ARG1, NODE_LITERAL) && ((LiteralNode*)ARG1)->type_name && strcmp(((LiteralNode*)ARG1)->type_name, "entero") == 0) {
+            int64_t cs_val = ((LiteralNode*)ARG1)->value.i;
+            emit(cg, OP_MOVER, 11, (cs_val != 0) ? 1 : 0, 0, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+        } else if (ARG1) {
+            visit_expression(cg, ARG1, 11);
+        } else {
+            emit(cg, OP_MOVER, 11, 0, 0, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+        }
+        
+        // Llamar al opcode con case sensitive
+        // A <- primer ID; B=termino_id, C=case_sensitive(0/1)
+        emit(cg, OP_MEM_BUSCAR_INTROSPECTIVA_CS, 1, 10, 11,
+             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+        // Convertir ID a texto
+        emit(cg, OP_ID_A_TEXTO, 1, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        codegen_emit_write_resultado(cg, 1);
+        emit(cg, OP_MOVER, (uint8_t)dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "buscar_en_memoria_detallada") == 0) {
+        // Búsqueda introspectiva detallada con metadata completa
+        // Argumentos: termino, max_resultados, case_sensitive (opcional)
+        if (cn->n_args < 2) return 0;
+        
+        // Cargar término de búsqueda en reg 10
+        if (is_node(ARG0, NODE_LITERAL) && ((LiteralNode*)ARG0)->type_name && strcmp(((LiteralNode*)ARG0)->type_name, "texto") == 0) {
+            size_t off = add_string(cg, ((LiteralNode*)ARG0)->value.str ? ((LiteralNode*)ARG0)->value.str : "");
+            emit(cg, OP_LOAD_STR_HASH, 10, off & 0xFF, (off >> 8) & 0xFF, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+        } else {
+            visit_expression(cg, ARG0, 10);
+        }
+        
+        // Cargar max_resultados en reg 11
+        uint32_t max_val = 10;
+        if (ARG1 && is_node(ARG1, NODE_LITERAL) && ((LiteralNode*)ARG1)->type_name && strcmp(((LiteralNode*)ARG1)->type_name, "entero") == 0) {
+            int64_t val = ((LiteralNode*)ARG1)->value.i;
+            if (val < 1) val = 1;
+            if (val > 100) val = 100;
+            max_val = (uint32_t)val;
+        }
+        
+        // Cargar case_sensitive en reg 12 (0 por defecto)
+        uint32_t cs_val = 0;
+        if (cn->n_args >= 3 && ARG2 && is_node(ARG2, NODE_LITERAL) && ((LiteralNode*)ARG2)->type_name && strcmp(((LiteralNode*)ARG2)->type_name, "entero") == 0) {
+            cs_val = (((LiteralNode*)ARG2)->value.i != 0) ? 1 : 0;
+        }
+        
+        // Empaquetar: max_resultados | (case_sensitive << 8)
+        uint32_t packed = max_val | (cs_val << 8);
+        emit(cg, OP_MOVER, 11, (uint8_t)(packed & 0xFF), (uint8_t)((packed >> 8) & 0xFF), 
+             IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+        
+        // Llamar al opcode detallado
+        // A <- lista_id con metadata; B=termino, C=max|(cs<<8)
+        emit(cg, OP_MEM_BUSCAR_INTROSPECTIVA_DETALLADA, 1, 10, 11,
+             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+        codegen_emit_write_resultado(cg, 1);
+        emit(cg, OP_MOVER, (uint8_t)dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+        if (strcmp(name, "procesar_texto") == 0) {
         visit_expression(cg, ARG0, dest_reg);
         emit(cg, OP_MEM_PROCESAR_TEXTO, (uint8_t)dest_reg, (uint8_t)dest_reg, 0,
              IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
@@ -3639,7 +3780,7 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         visit_expression(cg, ARG0, 10); /* origen */
         visit_expression(cg, ARG1, 11); /* K */
         if (cn->n_args >= 3 && ARG2) visit_expression(cg, ARG2, 12); /* tipo */
-        else emit(cg, OP_MOVER, 12, 0, 0, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE); /* tipo 0 = cualquiera */
+        else emit(cg, OP_MOVER, 12, 1, 0, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE); /* tipo 1 = asociaciones (defecto) */
         
         /* Empaquetar: (K << 8) | tipo */
         emit(cg, OP_MOVER, 13, 8, 0, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
@@ -4281,14 +4422,13 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         uint8_t flr = IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE;
         if (src_tmp.is_relative) flr |= IR_INST_FLAG_RELATIVE;
         emit(cg, OP_LEER, 15, src_tmp.addr & 0xFF, (src_tmp.addr >> 8) & 0xFF, flr);
-        emit(cg, OP_MEM_LISTA_TAMANO, 16, 15, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        emit(cg, OP_MEM_MAPA_TAMANO, 16, 15, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
         uint8_t flri = IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE;
         if (idx_tmp.is_relative) flri |= IR_INST_FLAG_RELATIVE;
         emit(cg, OP_LEER, 17, idx_tmp.addr & 0xFF, (idx_tmp.addr >> 8) & 0xFF, flri);
         emit(cg, OP_CMP_LT, 18, 17, 16, 0);
         emit(cg, OP_CMP_EQ, 18, 18, 0, IR_INST_FLAG_C_IMMEDIATE);
-        emit(cg, OP_SI, 18, 0, 0, IR_INST_FLAG_A_REGISTER);
-        add_patch(cg, end_id, PATCH_SI);
+        emit_jump_if_nonzero(cg, 18, end_id);
         emit(cg, OP_MEM_LISTA_OBTENER, 19, 15, 17, 0);
         emit(cg, OP_MOVER, 1, 19, 0, IR_INST_FLAG_B_REGISTER);
         int prev = cg->expr_allow_func_literal;
@@ -4356,14 +4496,13 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         uint8_t flr = IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE;
         if (src_tmp.is_relative) flr |= IR_INST_FLAG_RELATIVE;
         emit(cg, OP_LEER, 15, src_tmp.addr & 0xFF, (src_tmp.addr >> 8) & 0xFF, flr);
-        emit(cg, OP_MEM_LISTA_TAMANO, 16, 15, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        emit(cg, OP_MEM_MAPA_TAMANO, 16, 15, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
         uint8_t flri = IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE;
         if (idx_tmp.is_relative) flri |= IR_INST_FLAG_RELATIVE;
         emit(cg, OP_LEER, 17, idx_tmp.addr & 0xFF, (idx_tmp.addr >> 8) & 0xFF, flri);
         emit(cg, OP_CMP_LT, 18, 17, 16, 0);
         emit(cg, OP_CMP_EQ, 18, 18, 0, IR_INST_FLAG_C_IMMEDIATE);
-        emit(cg, OP_SI, 18, 0, 0, IR_INST_FLAG_A_REGISTER);
-        add_patch(cg, end_id, PATCH_SI);
+        emit_jump_if_nonzero(cg, 18, end_id);
         emit(cg, OP_MEM_LISTA_OBTENER, 19, 15, 17, 0);
         emit(cg, OP_MOVER, 1, 19, 0, IR_INST_FLAG_B_REGISTER);
         int prev2 = cg->expr_allow_func_literal;
@@ -4372,8 +4511,7 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         add_patch(cg, fn_lab, PATCH_JUMP);
         cg->expr_allow_func_literal = prev2;
         emit(cg, OP_CMP_EQ, 22, 1, 0, IR_INST_FLAG_C_IMMEDIATE);
-        emit(cg, OP_SI, 22, 0, 0, IR_INST_FLAG_A_REGISTER);
-        add_patch(cg, skip_agr_id, PATCH_SI);
+        emit_jump_if_nonzero(cg, 22, skip_agr_id);
         uint8_t flro = IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE;
         if (out_tmp.is_relative) flro |= IR_INST_FLAG_RELATIVE;
         emit(cg, OP_LEER, 20, out_tmp.addr & 0xFF, (out_tmp.addr >> 8) & 0xFF, flro);
@@ -5019,7 +5157,7 @@ static void emit_print_interpolated(CodeGen *cg, const char *text, int add_newli
 static void emit_imprimir_lista_resumen(CodeGen *cg, ASTNode *expr) {
     visit_expression(cg, expr, 1);
     if (cg->has_error) return;
-    emit(cg, OP_MEM_LISTA_TAMANO, 2, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+    emit(cg, OP_MEM_MAPA_TAMANO, 2, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
     emit_print_cstr(cg, "[lista id=");
     emit(cg, OP_IMPRIMIR_NUMERO, 1, 0, 0, IR_INST_FLAG_A_REGISTER);
     emit_print_cstr(cg, " tamano=");
@@ -5467,8 +5605,7 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
             // Si la izquierda es falsa (0), el resultado ya es 0 en dest_reg, saltamos al final
             int tmp_reg = (dest_reg == 254) ? 253 : 254;
             emit(cg, OP_CMP_EQ, tmp_reg, dest_reg, 0, IR_INST_FLAG_C_IMMEDIATE);
-            emit(cg, OP_SI, tmp_reg, 0, 0, IR_INST_FLAG_A_REGISTER);
-            add_patch(cg, end_label, PATCH_SI);
+            emit_jump_if_nonzero(cg, (uint8_t)tmp_reg, end_label);
             
             visit_expression(cg, bn->right, dest_reg);
             if (cg->has_error) return dest_reg;
@@ -5484,8 +5621,7 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
             if (cg->has_error) return dest_reg;
             
             // Si la izquierda es verdadera (no 0), saltamos al final
-            emit(cg, OP_SI, dest_reg, 0, 0, IR_INST_FLAG_A_REGISTER);
-            add_patch(cg, end_label, PATCH_SI);
+            emit_jump_if_nonzero(cg, (uint8_t)dest_reg, end_label);
             
             visit_expression(cg, bn->right, dest_reg);
             if (cg->has_error) return dest_reg;
@@ -5620,8 +5756,7 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
         /* Proteccion de Reg 1 (este): usar registro alto para la condicion. */
         int cond_reg = visit_expression(cg, tn->condition, 253);
         emit(cg, OP_CMP_EQ, 254, cond_reg, 0, IR_INST_FLAG_C_IMMEDIATE);
-        emit(cg, OP_SI, 254, 0, 0, IR_INST_FLAG_A_REGISTER);
-        add_patch(cg, else_id, PATCH_SI);
+        emit_jump_if_nonzero(cg, 254, else_id);
         
         visit_expression(cg, tn->true_expr, dest_reg);
         emit(cg, OP_IR, 0, 0, 0, 0);
@@ -5845,7 +5980,7 @@ static int visit_expression(CodeGen *cg, ASTNode *node, int dest_reg) {
         if ((strcmp(t, "lista") == 0 || strcmp(t, "mapa") == 0) &&
             (strcmp(man->member, "medida") == 0 || strcmp(man->member, "tamano") == 0 || strcmp(man->member, "size") == 0)) {
             int tr = visit_expression(cg, man->target, dest_reg);
-            emit(cg, OP_MEM_LISTA_TAMANO, dest_reg, tr, 0, IR_INST_FLAG_B_REGISTER);
+            emit(cg, OP_MEM_MAPA_TAMANO, dest_reg, tr, 0, IR_INST_FLAG_B_REGISTER);
             return dest_reg;
         }
         /* Usar un registro temporal seguro (254) para evitar colisiones con 'este' (reg 1) o dest_reg */
@@ -6481,8 +6616,7 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
             }
             
             emit(cg, OP_CMP_EQ, cmp_reg, any_reg, 0, IR_INST_FLAG_C_IMMEDIATE);
-            emit(cg, OP_SI, cmp_reg, 0, 0, IR_INST_FLAG_A_REGISTER);
-            add_patch(cg, next_case_id, PATCH_SI);
+            emit_jump_if_nonzero(cg, (uint8_t)cmp_reg, next_case_id);
             sym_enter_scope(&cg->sym, 0);
             visit_block(cg, sc->body);
             sym_exit_scope(&cg->sym);
@@ -6608,8 +6742,7 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
         /* Proteccion de Reg 1 (este): usar registros altos para la condicion. */
         int reg = visit_expression(cg, wn->condition, 253);
         emit(cg, OP_CMP_EQ, 254, reg, 0, IR_INST_FLAG_C_IMMEDIATE);
-        emit(cg, OP_SI, 254, 0, 0, IR_INST_FLAG_A_REGISTER);
-        add_patch(cg, end_id, PATCH_SI);
+        emit_jump_if_nonzero(cg, 254, end_id);
         sym_enter_scope(&cg->sym, 0);
         visit_block(cg, wn->body);
         sym_exit_scope(&cg->sym);
@@ -6667,12 +6800,11 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
         emit_escribir_u24(cg, idx_tmp.addr, 15, idx_tmp.is_relative);
         mark_label(cg, start_id);
         emit_leer_u24(cg, 15, src_tmp.addr, src_tmp.is_relative);
-        emit(cg, OP_MEM_LISTA_TAMANO, 16, 15, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        emit(cg, OP_MEM_MAPA_TAMANO, 16, 15, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
         emit_leer_u24(cg, 17, idx_tmp.addr, idx_tmp.is_relative);
         emit(cg, OP_CMP_LT, 18, 17, 16, 0);
         emit(cg, OP_CMP_EQ, 18, 18, 0, IR_INST_FLAG_C_IMMEDIATE);
-        emit(cg, OP_SI, 18, 0, 0, IR_INST_FLAG_A_REGISTER);
-        add_patch(cg, end_id, PATCH_SI);
+        emit_jump_if_nonzero(cg, 18, end_id);
         emit(cg, OP_MEM_LISTA_OBTENER, 19, 15, 17, 0);
         emit_escribir_u24(cg, iter_r.addr, 19, iter_r.is_relative);
         visit_block(cg, fe->body);
@@ -6713,8 +6845,7 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
         emit(cg, OP_CMP_EQ, 254, reg, 0, IR_INST_FLAG_C_IMMEDIATE);
         emit(cg, OP_CMP_EQ, 254, 254, 0, IR_INST_FLAG_C_IMMEDIATE);
         
-        emit(cg, OP_SI, 254, 0, 0, IR_INST_FLAG_A_REGISTER);
-        add_patch(cg, start_id, PATCH_SI);
+        emit_jump_if_nonzero(cg, 254, start_id);
         
         mark_label(cg, end_id);
         if (cg->loop_stack_n) cg->loop_stack_n--;
@@ -6729,8 +6860,7 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
         /* Proteccion de Reg 1 (este): usar registros altos para la condicion. */
         int reg = visit_expression(cg, in->condition, 253);
         emit(cg, OP_CMP_EQ, 254, reg, 0, IR_INST_FLAG_C_IMMEDIATE);
-        emit(cg, OP_SI, 254, 0, 0, IR_INST_FLAG_A_REGISTER);
-        add_patch(cg, else_id, PATCH_SI);
+        emit_jump_if_nonzero(cg, 254, else_id);
         sym_enter_scope(&cg->sym, 0);
         visit_block(cg, in->body);
         emit(cg, OP_IR, 0, 0, 0, 0);

@@ -209,7 +209,24 @@ static int keyword_ok_as_user_identifier(const char *s) {
             strcmp(s, "entrada") == 0 || strcmp(s, "texto") == 0 ||
             strcmp(s, "caracter") == 0 || strcmp(s, "bool") == 0 ||
             strcmp(s, "lista") == 0 || strcmp(s, "mapa") == 0 ||
-            strcmp(s, "padre") == 0 ||
+            strcmp(s, "entero") == 0 || strcmp(s, "flotante") == 0 ||
+            strcmp(s, "u32") == 0 || strcmp(s, "u64") == 0 ||
+            strcmp(s, "u8") == 0 || strcmp(s, "byte") == 0 ||
+            strcmp(s, "bytes") == 0 || strcmp(s, "padre") == 0 ||
+            strcmp(s, "a") == 0 || strcmp(s, "de") == 0 ||
+            strcmp(s, "con") == 0 || strcmp(s, "o") == 0 ||
+            strcmp(s, "y") == 0 || strcmp(s, "que") == 0 ||
+            strcmp(s, "como") == 0 || strcmp(s, "todo") == 0 ||
+            strcmp(s, "todas") == 0 || strcmp(s, "sobre") == 0 ||
+            strcmp(s, "valor") == 0 || strcmp(s, "peso") == 0 ||
+            strcmp(s, "igual") == 0 || strcmp(s, "es") == 0 ||
+            strcmp(s, "entonces") == 0 || strcmp(s, "retorna") == 0 ||
+            strcmp(s, "mayor") == 0 || strcmp(s, "menor") == 0 ||
+            strcmp(s, "distinto") == 0 || strcmp(s, "hacer") == 0 ||
+            strcmp(s, "json") == 0 || strcmp(s, "objeto") == 0 ||
+            strcmp(s, "decimal") == 0 || strcmp(s, "registro") == 0 ||
+            strcmp(s, "clase") == 0 || strcmp(s, "privado") == 0 ||
+            strcmp(s, "caso") == 0 || strcmp(s, "defecto") == 0 ||
             is_sistema_llamada(s, L));
 }
 
@@ -255,6 +272,20 @@ static int validate_user_defined_name_tok(Parser *p, const Token *tok) {
                       tok->line, tok->column, s);
         return 0;
     }
+
+    // Verificar si es una función del sistema (built-in)
+    if (is_sistema_llamada(s, strlen(s))) {
+        if (p->source_path && p->source_path[0])
+            set_error_at(p, tok->line, tok->column,
+                      "Archivo %s, linea %d, columna %d: '%s' es una funcion incorporada del lenguaje. No puede ser redeclarada como funcion de usuario.",
+                      p->source_path, tok->line, tok->column, s);
+        else
+            set_error_at(p, tok->line, tok->column,
+                      "linea %d, columna %d: '%s' es una funcion incorporada del lenguaje. No puede ser redeclarada como funcion de usuario.",
+                      tok->line, tok->column, s);
+        return 0;
+    }
+
     return 1;
 }
 
@@ -4549,8 +4580,8 @@ static ASTNode *parse_function(Parser *p, int is_exported, int is_async) {
     if (rts_rt && strcmp(rts_rt, "fin_funcion") != 0 &&
         (strcmp(rts_rt, "entero") == 0 || strcmp(rts_rt, "texto") == 0 ||
          strcmp(rts_rt, "flotante") == 0 || strcmp(rts_rt, "caracter") == 0 ||
-         strcmp(rts_rt, "bool") == 0 || strcmp(rts_rt, "lista") == 0 ||
-         strcmp(rts_rt, "mapa") == 0 || strcmp(rts_rt, "u32") == 0 ||
+         strcmp(rts_rt, "bool") == 0 || strcmp(rts_rt, "elemento") == 0 ||
+         strcmp(rts_rt, "lista") == 0 || strcmp(rts_rt, "mapa") == 0 || strcmp(rts_rt, "u32") == 0 ||
          strcmp(rts_rt, "u64") == 0 || strcmp(rts_rt, "u8") == 0 ||
          strcmp(rts_rt, "byte") == 0 || strcmp(rts_rt, "vec2") == 0 ||
          strcmp(rts_rt, "vec3") == 0 || strcmp(rts_rt, "vec4") == 0 || strcmp(rts_rt, "mat4") == 0 || strcmp(rts_rt, "mat3") == 0 ||

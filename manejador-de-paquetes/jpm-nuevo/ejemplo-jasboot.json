@@ -1,0 +1,33 @@
+{
+  "nombre": "ejemplo-paquete",
+  "version": "1.2.3",
+  "descripcion": "Un paquete de ejemplo para Jasboot con todas las características",
+  "autor": "Tu Nombre <tu.email@ejemplo.com>",
+  "licencia": "MIT",
+  "principal": "src/main.jasb",
+  "jasboot": "^0.1.0",
+  "tipo": "biblioteca",
+  "repositorio": "https://github.com/usuario/ejemplo-paquete",
+  "homepage": "https://ejemplo-paquete.com",
+  "palabrasClave": [
+    "jasboot",
+    "ejemplo",
+    "utilidades",
+    "biblioteca"
+  ],
+  "dependencias": {
+    "libreria-math": "^2.0.0",
+    "utilidades-texto": "~1.5.2",
+    "http-client": ">=0.3.0"
+  },
+  "dependenciasDev": {
+    "test-framework": "^3.1.0",
+    "generador-docs": "~2.0.0"
+  },
+  "scripts": {
+    "test": "jasboot tests/test.jasb",
+    "build": "jpm pack",
+    "docs": "jasboot scripts/generar-docs.jasb",
+    "lint": "jasboot scripts/lint.jasb"
+  }
+}
