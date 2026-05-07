@@ -131,6 +131,8 @@ void jmn_mapa_insertar(JMNMemoria* mem, uint32_t map_id, uint32_t key, JMNValor 
 /** 1 si la clave existe en el slot del mapa; en *out el valor (si out no es NULL). */
 int jmn_mapa_obtener_si_existe(JMNMemoria* mem, uint32_t map_id, uint32_t key, JMNValor* out);
 JMNValor jmn_mapa_obtener(JMNMemoria* mem, uint32_t map_id, uint32_t key);
+uint32_t jmn_mapa_obtener_llave(JMNMemoria* mem, uint32_t map_id, uint32_t idx);
+JMNValor jmn_mapa_obtener_valor_por_indice(JMNMemoria* mem, uint32_t map_id, uint32_t idx);
 int jmn_mapa_existe(JMNMemoria* mem, uint32_t map_id);
 
 /* Búsqueda e inferencia */

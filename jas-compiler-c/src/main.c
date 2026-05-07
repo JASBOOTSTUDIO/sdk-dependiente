@@ -9,11 +9,13 @@
 #include "codegen.h"
 #include "jbc_ir_opt.h"
 #include "opcodes.h"
+#include "keywords.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <locale.h>
 
 #ifdef _WIN32
 #include <process.h>
@@ -27,13 +29,30 @@ typedef unsigned long DWORD_;
 #define WINAPI __stdcall
 #endif
 __declspec(dllimport) DWORD_ WINAPI GetModuleFileNameA(HMODULE_ hModule, char *lpFilename, DWORD_ nSize);
+__declspec(dllimport) int WINAPI SetConsoleOutputCP(unsigned int wCodePageID);
+__declspec(dllimport) int WINAPI SetConsoleCP(unsigned int wCodePageID);
 #define chdir _chdir
 #define PATH_SEP '\\'
 #else
 #include <unistd.h>
 #include <dirent.h>
+#include <strings.h>
 #define PATH_SEP '/'
 #endif
+
+/* UTF-8 en stderr/stdout: en Windows sin esto aparecen secuencias como "Declaraci├│n" por desajuste CP/OEM vs UTF-8. */
+static void jb_init_console_unicode(void) {
+    static int inited = 0;
+    if (inited) return;
+    inited = 1;
+#ifdef _WIN32
+    /* 65001 = CP_UTF8; afecta tanto consola legacy como terminals modernos al interpretar los bytes escritos por fprintf */
+    SetConsoleOutputCP(65001u);
+    SetConsoleCP(65001u);
+#else
+    setlocale(LC_CTYPE, "");
+#endif
+}
 
 /* Directorio que contiene jbc.exe (sin barra final); para encontrar la VM aunque cwd este en tests profundos. */
 static char g_jbc_exe_dir[1024];
@@ -315,6 +334,67 @@ static char *usar_canonical_path(const char *full_open_path) {
     return strdup(full_open_path);
 }
 
+/* Ruta canonica del .jasb del modulo para diagnosticos tras fusion AST. */
+static void merger_assign_diag_unit(char **slot, const char *full_open_path) {
+    if (!slot || !full_open_path || !full_open_path[0]) return;
+    free(*slot);
+    *slot = usar_canonical_path(full_open_path);
+    if (!*slot)
+        *slot = strdup(full_open_path);
+}
+
+static void merger_assign_diag_struct_recursive(StructDefNode *sd, const char *full_open_path);
+
+static void merger_assign_diag_struct_recursive(StructDefNode *sd, const char *full_open_path) {
+    if (!sd || !full_open_path || !full_open_path[0]) return;
+    merger_assign_diag_unit(&sd->diag_source_unit, full_open_path);
+    for (size_t j = 0; j < sd->n_methods; j++) {
+        ASTNode *mj = sd->methods[j];
+        if (mj && mj->type == NODE_FUNCTION)
+            merger_assign_diag_unit(&((FunctionNode *)mj)->diag_source_unit, full_open_path);
+    }
+    for (size_t k = 0; k < sd->n_nested_structs; k++) {
+        ASTNode *nested = sd->nested_structs[k];
+        if (nested && nested->type == NODE_STRUCT_DEF)
+            merger_assign_diag_struct_recursive((StructDefNode *)nested, full_open_path);
+    }
+}
+
+#ifdef _WIN32
+#define jb_paths_same_file(a, b) ((a) && (b) && _stricmp((a), (b)) == 0)
+#else
+#define jb_paths_same_file(a, b) ((a) && (b) && strcasecmp((a), (b)) == 0)
+#endif
+
+/* Lectura opcional para fragmentos de diagnosticos en errores semanticos desde modulos usar. */
+static char *jb_read_utf8_file(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    long sz = ftell(fp);
+    if (sz < 0) {
+        fclose(fp);
+        return NULL;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    size_t buflen = (size_t)sz;
+    char *out = malloc(buflen + 1);
+    if (!out) {
+        fclose(fp);
+        return NULL;
+    }
+    size_t nr = fread(out, 1, buflen, fp);
+    fclose(fp);
+    out[nr] = '\0';
+    return out;
+}
+
 static void usar_module_dirname(const char *file_path, char *base_dir, size_t base_sz) {
     if (!file_path || !base_dir || base_sz < 2) return;
     const char *last_sep = strrchr(file_path, '/');
@@ -443,6 +523,8 @@ static int should_merge_struct(const ASTNode *g, const ProgramNode *mp, const Ac
 /* Valida `usar { ... }` contra el modulo parseado.
  * import_site_* = donde esta el `usar` en el archivo que importa.
  * module_source_path = ruta del .jasb del modulo cargado (mp), se muestra canonica si es posible. */
+static void free_name_array(char **arr, size_t n);
+static int collect_exported_names(const ProgramNode *mp, char ***out_names, size_t *out_count);
 static int validate_named_imports_for_module(const ProgramNode *mp, const ActivarModuloNode *spec,
     const char *import_site_path, int import_line, int import_col,
     const char *module_source_path) {
@@ -536,6 +618,21 @@ static int validate_named_imports_for_module(const ProgramNode *mp, const Activa
         if (!ff && !vv && !ss) {
             fprintf(stderr, "%s%s, linea %d, columna %d: error: `usar { ... }`: no se hallo `%s` entre las funciones y globales exportados (`enviar`) del modulo '%s'.%s\n",
                 ANSI_RED, import_site_path, il, ic, want, mod_show, ANSI_RESET);
+            char **exported = NULL;
+            size_t n_exported = 0;
+            if (collect_exported_names(mp, &exported, &n_exported) && n_exported > 0) {
+                fprintf(stderr, "%s  Exportados disponibles en el modulo:%s\n", ANSI_RED, ANSI_RESET);
+                size_t shown = n_exported < 12 ? n_exported : 12;
+                for (size_t ei = 0; ei < shown; ei++) {
+                    fprintf(stderr, "%s    - %s%s\n", ANSI_RED, exported[ei], ANSI_RESET);
+                }
+                if (n_exported > shown) {
+                    fprintf(stderr, "%s    ... y %zu mas%s\n", ANSI_RED, n_exported - shown, ANSI_RESET);
+                }
+            } else {
+                fprintf(stderr, "%s  El modulo no expone simbolos con `enviar`.%s\n", ANSI_RED, ANSI_RESET);
+            }
+            free_name_array(exported, n_exported);
             fprintf(stderr, "%s  Nota: si en el archivo del modulo \"deberia\" estar `%s`, suele deberse a que esa declaracion no llego al analizador (error de sintaxis, palabra reservada como nombre de parametro o variable, macro mal cerrada, etc.). Corrija primero el modulo; el nombre en `usar { ... }` debe coincidir exactamente con un simbolo `enviar` valido.%s\n",
                 ANSI_RED, want, ANSI_RESET);
             free(mod_canon);
@@ -583,6 +680,491 @@ static int validate_named_imports_for_module(const ProgramNode *mp, const Activa
     return 0;
 }
 
+static void free_name_array(char **arr, size_t n) {
+    if (!arr) return;
+    for (size_t i = 0; i < n; i++) free(arr[i]);
+    free(arr);
+}
+
+static int name_array_contains(char **arr, size_t n, const char *name) {
+    if (!arr || !name) return 0;
+    for (size_t i = 0; i < n; i++) {
+        if (arr[i] && strcmp(arr[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
+static int name_array_add_unique(char ***arr, size_t *n, const char *name) {
+    if (!arr || !n || !name || !name[0]) return 0;
+    if (name_array_contains(*arr, *n, name)) return 1;
+    char **tmp = (char **)realloc(*arr, sizeof(char *) * (*n + 1));
+    if (!tmp) return 0;
+    tmp[*n] = strdup(name);
+    if (!tmp[*n]) return 0;
+    *arr = tmp;
+    (*n)++;
+    return 1;
+}
+
+static int collect_exported_names(const ProgramNode *mp, char ***out_names, size_t *out_count) {
+    if (!out_names || !out_count) return 0;
+    *out_names = NULL;
+    *out_count = 0;
+    if (!mp) return 1;
+
+    for (size_t i = 0; i < mp->n_funcs; i++) {
+        FunctionNode *fn = (FunctionNode *)mp->functions[i];
+        if (fn && fn->is_exported && fn->name && fn->name[0]) {
+            if (!name_array_add_unique(out_names, out_count, fn->name)) return 0;
+        }
+    }
+    for (size_t i = 0; i < mp->n_globals; i++) {
+        ASTNode *g = mp->globals[i];
+        if (!g) continue;
+        if (g->type == NODE_VAR_DECL) {
+            VarDeclNode *vd = (VarDeclNode *)g;
+            if (vd->is_exported && vd->name && vd->name[0]) {
+                if (!name_array_add_unique(out_names, out_count, vd->name)) return 0;
+            }
+        } else if (g->type == NODE_STRUCT_DEF) {
+            StructDefNode *sd = (StructDefNode *)g;
+            if (sd->is_exported && sd->name && sd->name[0]) {
+                if (!name_array_add_unique(out_names, out_count, sd->name)) return 0;
+            }
+        } else if (g->type == NODE_EXPORT_DIRECTIVE) {
+            ExportDirectiveNode *en = (ExportDirectiveNode *)g;
+            for (size_t k = 0; k < en->n_names; k++) {
+                const char *nm = en->names[k];
+                if (!nm) continue;
+                while (*nm == ' ' || *nm == '\t' || *nm == '\r' || *nm == '\n') nm++;
+                if (!*nm) continue;
+                if (!name_array_add_unique(out_names, out_count, nm)) return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+/* ---------- Barrido masivo de identificadores reservados (programa fusionado) ---------- */
+
+typedef struct {
+    const char *entry_diag_path;
+    const char *entry_buf;
+    char *cached_path_norm;
+    char *cached_buf;
+} JBReservedSnip;
+
+static void jb_rsv_snip_fini(JBReservedSnip *s) {
+    if (!s) return;
+    free(s->cached_path_norm);
+    free(s->cached_buf);
+    s->cached_path_norm = NULL;
+    s->cached_buf = NULL;
+}
+
+static const char *jb_rsv_resolve_src(JBReservedSnip *s, const char *unit_opt) {
+    const char *want = unit_opt && unit_opt[0] ? unit_opt : s->entry_diag_path;
+    if (!want || !s->entry_buf) return s->entry_buf;
+
+    if (s->entry_diag_path && jb_paths_same_file(want, s->entry_diag_path))
+        return s->entry_buf;
+
+    if (s->cached_path_norm && s->cached_buf && jb_paths_same_file(want, s->cached_path_norm))
+        return s->cached_buf;
+
+    free(s->cached_buf);
+    s->cached_buf = NULL;
+    free(s->cached_path_norm);
+    s->cached_path_norm = usar_canonical_path(want);
+    if (!s->cached_path_norm) s->cached_path_norm = strdup(want);
+    s->cached_buf = jb_read_utf8_file(want);
+    return s->cached_buf ? s->cached_buf : s->entry_buf;
+}
+
+static void jb_emit_semantic_reserved(JBReservedSnip *s, const char *unit_opt,
+                                      int line, int col,
+                                      const char *scope_sym,
+                                      const char *bad_id,
+                                      const char *ctxt_label, int *errs_out) {
+    const char *path_raw = unit_opt && unit_opt[0] ? unit_opt : s->entry_diag_path;
+    char *mod_canon = usar_canonical_path(path_raw);
+    const char *mod_show = (mod_canon && mod_canon[0]) ? mod_canon : path_raw;
+    const char *src_text = jb_rsv_resolve_src(s, unit_opt);
+    int ln = line > 0 ? line : 1;
+    int cn = col > 0 ? col : 1;
+
+    char head[2048];
+    if (scope_sym && scope_sym[0]) {
+        snprintf(head, sizeof head,
+                 "Archivo %s, linea %d, columna %d: error semantico: %s en '%s': el identificador '%s' coincide "
+                 "con una palabra reservada del lenguaje (o con una palabra en inglés no permitida). Elija otro nombre.",
+                 mod_show, ln, cn, ctxt_label, scope_sym, bad_id);
+    } else {
+        snprintf(head, sizeof head,
+                 "Archivo %s, linea %d, columna %d: error semantico: %s: el identificador '%s' coincide "
+                 "con una palabra reservada del lenguaje (o con una palabra en inglés no permitida). Elija otro nombre.",
+                 mod_show, ln, cn, ctxt_label, bad_id);
+    }
+
+    char *full = src_text ? diag_attach_snippet(src_text, ln, cn, head) : NULL;
+    fprintf(stderr, "%s%s%s", ANSI_RED, full ? full : head, ANSI_RESET);
+    if (full && full[0] && full[strlen(full) - 1] != '\n')
+        fputc('\n', stderr);
+    free(full);
+    free(mod_canon);
+    if (errs_out) (*errs_out)++;
+}
+
+static void jb_emit_semantic_line(JBReservedSnip *s, const char *unit_opt,
+                                  int line, int col,
+                                  const char *message_after_colon_no_prefix, int *errs_out) {
+    const char *path_raw = unit_opt && unit_opt[0] ? unit_opt : s->entry_diag_path;
+    char *mod_canon = usar_canonical_path(path_raw);
+    const char *mod_show = (mod_canon && mod_canon[0]) ? mod_canon : path_raw;
+    const char *src_text = jb_rsv_resolve_src(s, unit_opt);
+    int ln = line > 0 ? line : 1;
+    int cn = col > 0 ? col : 1;
+    char head[2048];
+    snprintf(head, sizeof head,
+             "Archivo %s, linea %d, columna %d: error semantico: %s",
+             mod_show, ln, cn, message_after_colon_no_prefix);
+    char *full = src_text ? diag_attach_snippet(src_text, ln, cn, head) : NULL;
+    fprintf(stderr, "%s%s%s", ANSI_RED, full ? full : head, ANSI_RESET);
+    if (full && full[0] && full[strlen(full) - 1] != '\n')
+        fputc('\n', stderr);
+    free(full);
+    free(mod_canon);
+    if (errs_out) (*errs_out)++;
+}
+
+static void jb_precheck_lambda_params(JBReservedSnip *s, LambdaDeclNode *ld,
+                                      const char *unit_opt,
+                                      const char *scope_hint, int *errs) {
+    if (!ld) return;
+    int line = ld->base.line > 0 ? ld->base.line : 1;
+    int col = ld->base.col > 0 ? ld->base.col : 1;
+    for (size_t i = 0; i < ld->n_params; i++) {
+        const char *nm = ld->params ? ld->params[i] : NULL;
+        if (!nm || !nm[0] || !is_reserved_identifier(nm))
+            continue;
+        jb_emit_semantic_reserved(s, unit_opt, line, col,
+                                 scope_hint, nm, "Parámetro de macro/lambda", errs);
+    }
+}
+
+static void jb_precheck_visit_var_stmt(JBReservedSnip *s, VarDeclNode *vd,
+                                       const char *unit_opt,
+                                       const char *scope_fn, int *errs) {
+    if (!vd) return;
+    if (vd->value && vd->value->type == NODE_LAMBDA_DECL &&
+        vd->type_name && strcmp(vd->type_name, "macro") == 0) {
+        if (vd->name && is_reserved_identifier(vd->name))
+            jb_emit_semantic_reserved(s, unit_opt,
+                                      vd->base.line > 0 ? vd->base.line : 1,
+                                      vd->base.col > 0 ? vd->base.col : 1,
+                                      scope_fn, vd->name, "Declaración de macro", errs);
+        jb_precheck_lambda_params(s, (LambdaDeclNode *)vd->value,
+                                  unit_opt, scope_fn ? scope_fn : "?", errs);
+        return;
+    }
+    if (vd->name && is_reserved_identifier(vd->name)) {
+        jb_emit_semantic_reserved(s, unit_opt,
+                                  vd->base.line > 0 ? vd->base.line : 1,
+                                  vd->base.col > 0 ? vd->base.col : 1,
+                                  scope_fn, vd->name, "Declaración de variable", errs);
+    }
+}
+
+static int jb_precheck_walk_block(JBReservedSnip *, BlockNode *,
+                                  const char *unit_opt, const char *scope_fn, int *errs);
+
+static int jb_precheck_walk_stmt(JBReservedSnip *s, ASTNode *node,
+                                 const char *unit_opt,
+                                 const char *scope_fn, int *errs) {
+    if (!node) return 0;
+
+    switch (node->type) {
+        case NODE_BLOCK:
+            jb_precheck_walk_block(s, (BlockNode *)node, unit_opt, scope_fn, errs);
+            break;
+        case NODE_VAR_DECL:
+            jb_precheck_visit_var_stmt(s, (VarDeclNode *)node, unit_opt, scope_fn, errs);
+            break;
+        case NODE_PRINT:
+        case NODE_RETURN:
+        case NODE_BREAK:
+        case NODE_CONTINUE:
+        case NODE_THROW:
+        case NODE_END_DO_WHILE:
+        case NODE_RECORDAR:
+        case NODE_RESPONDER:
+        case NODE_APRENDER:
+        case NODE_BUSCAR_PESO:
+        case NODE_ASOCIAR:
+        case NODE_ACTIVAR_MODULO:
+        case NODE_BIBLIOTECA:
+        case NODE_CREAR_MEMORIA:
+        case NODE_CERRAR_MEMORIA:
+        case NODE_DEFINE_CONCEPTO:
+            /* sin enlaces declarativos revisados aqui */
+            break;
+        case NODE_IF: {
+            IfNode *inh = (IfNode *)node;
+            jb_precheck_walk_stmt(s, inh->body, unit_opt, scope_fn, errs);
+            if (inh->else_body)
+                jb_precheck_walk_stmt(s, inh->else_body, unit_opt, scope_fn, errs);
+            break;
+        }
+        case NODE_WHILE: {
+            WhileNode *wn = (WhileNode *)node;
+            jb_precheck_walk_stmt(s, wn->body, unit_opt, scope_fn, errs);
+            break;
+        }
+        case NODE_DO_WHILE: {
+            DoWhileNode *dw = (DoWhileNode *)node;
+            jb_precheck_walk_stmt(s, dw->body, unit_opt, scope_fn, errs);
+            break;
+        }
+        case NODE_FOREACH: {
+            ForEachNode *fe = (ForEachNode *)node;
+            if (fe->iter_name && is_reserved_identifier(fe->iter_name)) {
+                jb_emit_semantic_reserved(s, unit_opt,
+                                          fe->base.line > 0 ? fe->base.line : 1,
+                                          fe->base.col > 0 ? fe->base.col : 1,
+                                          scope_fn, fe->iter_name, "Variable de para_cada", errs);
+            }
+            jb_precheck_walk_stmt(s, fe->body, unit_opt, scope_fn, errs);
+            break;
+        }
+        case NODE_TRY: {
+            TryNode *tn = (TryNode *)node;
+            if (tn->catch_var && is_reserved_identifier(tn->catch_var)) {
+                jb_emit_semantic_reserved(s, unit_opt,
+                                          tn->base.line > 0 ? tn->base.line : 1,
+                                          tn->base.col > 0 ? tn->base.col : 1,
+                                          scope_fn, tn->catch_var, "Variable de atrapar (catch)", errs);
+            }
+            jb_precheck_walk_stmt(s, tn->try_body, unit_opt, scope_fn, errs);
+            jb_precheck_walk_stmt(s, tn->catch_body, unit_opt, scope_fn, errs);
+            jb_precheck_walk_stmt(s, tn->final_body, unit_opt, scope_fn, errs);
+            break;
+        }
+        case NODE_SELECT: {
+            SelectNode *sn = (SelectNode *)node;
+            for (size_t ci = 0; ci < sn->n_cases; ci++)
+                jb_precheck_walk_stmt(s, sn->cases[ci].body, unit_opt, scope_fn, errs);
+            if (sn->default_body)
+                jb_precheck_walk_stmt(s, sn->default_body, unit_opt, scope_fn, errs);
+            break;
+        }
+        case NODE_ASSIGNMENT:
+            break;
+        case NODE_EXTRAER_TEXTO: {
+            ExtraerTextoNode *ex = (ExtraerTextoNode *)node;
+            if (ex->target && ex->target[0] && is_reserved_identifier(ex->target)) {
+                jb_emit_semantic_reserved(s, unit_opt,
+                                          ex->base.line > 0 ? ex->base.line : 1,
+                                          ex->base.col > 0 ? ex->base.col : 1,
+                                          scope_fn, ex->target, "Destino de extraer texto", errs);
+            }
+            break;
+        }
+        case NODE_ULTIMA_PALABRA: {
+            UltimaPalabraNode *un = (UltimaPalabraNode *)node;
+            if (un->target && un->target[0] && is_reserved_identifier(un->target)) {
+                jb_emit_semantic_reserved(s, unit_opt,
+                                          un->base.line > 0 ? un->base.line : 1,
+                                          un->base.col > 0 ? un->base.col : 1,
+                                          scope_fn, un->target, "Destino de ultima_palabra", errs);
+            }
+            break;
+        }
+        case NODE_COPIAR_TEXTO: {
+            CopiarTextoNode *kn = (CopiarTextoNode *)node;
+            if (kn->target && kn->target[0] && is_reserved_identifier(kn->target)) {
+                jb_emit_semantic_reserved(s, unit_opt,
+                                          kn->base.line > 0 ? kn->base.line : 1,
+                                          kn->base.col > 0 ? kn->base.col : 1,
+                                          scope_fn, kn->target, "Destino de copiar_texto", errs);
+            }
+            break;
+        }
+        case NODE_INPUT: {
+            InputNode *in = (InputNode *)node;
+            if (in->variable && in->variable[0] && is_reserved_identifier(in->variable)) {
+                jb_emit_semantic_reserved(s, unit_opt,
+                                          in->base.line > 0 ? in->base.line : 1,
+                                          in->base.col > 0 ? in->base.col : 1,
+                                          scope_fn, in->variable, "Variable de ingresar_texto", errs);
+            }
+            break;
+        }
+        case NODE_STRUCT_DEF:
+            /* registro/clase anidado no emitido en bloque normalmente */
+            break;
+        default:
+            break;
+    }
+    return 0;
+}
+
+static int jb_precheck_walk_block(JBReservedSnip *s, BlockNode *b,
+                                  const char *unit_opt,
+                                  const char *scope_fn, int *errs) {
+    if (!b || !b->statements) return 0;
+    for (size_t si = 0; si < b->n; si++)
+        jb_precheck_walk_stmt(s, b->statements[si], unit_opt, scope_fn, errs);
+    return 0;
+}
+
+static void jb_precheck_function(JBReservedSnip *s,
+                                 FunctionNode *fn,
+                                 const char *class_name,
+                                 int *errs) {
+    if (!fn) return;
+    const char *unit_opt = fn->diag_source_unit;
+    char scope[256];
+    if (class_name && class_name[0])
+        snprintf(scope, sizeof scope, "%s.%s",
+                 class_name, fn->name && fn->name[0] ? fn->name : "?");
+    else
+        snprintf(scope, sizeof scope, "%s", fn->name && fn->name[0] ? fn->name : "?");
+
+    if (fn->name && is_reserved_identifier(fn->name)) {
+        char msg[448];
+        if (class_name && class_name[0]) {
+            snprintf(msg, sizeof msg,
+                     "Registro o clase '%s': el método '%s' no puede llamarse así (palabra reservada o inglés prohibido).",
+                     class_name, fn->name);
+        } else {
+            snprintf(msg, sizeof msg,
+                     "Función '%s': el nombre coincide con una palabra reservada (o inglés prohibido); elija otro identificador.",
+                     fn->name);
+        }
+        jb_emit_semantic_line(s, unit_opt, fn->base.line > 0 ? fn->base.line : 1,
+                             fn->base.col > 0 ? fn->base.col : 1, msg, errs);
+    }
+
+    for (size_t pi = 0; pi < fn->n_params; pi++) {
+        ASTNode *pn = fn->params ? fn->params[pi] : NULL;
+        if (!pn || pn->type != NODE_VAR_DECL) continue;
+        VarDeclNode *pv = (VarDeclNode *)pn;
+        if (!pv->name || !pv->name[0] || !is_reserved_identifier(pv->name))
+            continue;
+        jb_emit_semantic_reserved(s, unit_opt,
+                                  pv->base.line > 0 ? pv->base.line : 1,
+                                  pv->base.col > 0 ? pv->base.col : 1,
+                                  scope, pv->name, "Parámetro de función", errs);
+    }
+
+    if (fn->body)
+        jb_precheck_walk_stmt(s, fn->body, unit_opt, scope, errs);
+}
+
+static void jb_precheck_global_var(JBReservedSnip *s, VarDeclNode *vd, int *errs) {
+    const char *unit_opt = vd->diag_source_unit;
+    if (vd->value && vd->value->type == NODE_LAMBDA_DECL &&
+        vd->type_name && strcmp(vd->type_name, "macro") == 0) {
+        if (vd->name && is_reserved_identifier(vd->name))
+            jb_emit_semantic_reserved(s, unit_opt,
+                                      vd->base.line > 0 ? vd->base.line : 1,
+                                      vd->base.col > 0 ? vd->base.col : 1,
+                                      NULL, vd->name, "Variable global (macro)", errs);
+        jb_precheck_lambda_params(s, (LambdaDeclNode *)vd->value, unit_opt, "<global>", errs);
+        return;
+    }
+    if (vd->name && is_reserved_identifier(vd->name)) {
+        jb_emit_semantic_reserved(s, unit_opt,
+                                  vd->base.line > 0 ? vd->base.line : 1,
+                                  vd->base.col > 0 ? vd->base.col : 1,
+                                  NULL, vd->name, "Variable global", errs);
+    }
+}
+
+static void jb_precheck_struct_def(JBReservedSnip *s,
+                                   StructDefNode *sd, int *errs) {
+    if (!sd) return;
+    const char *unit_sd = sd->diag_source_unit;
+
+    int line0 = sd->base.line > 0 ? sd->base.line : 1;
+    int col0 = sd->base.col > 0 ? sd->base.col : 1;
+
+    if (sd->name && is_reserved_identifier(sd->name)) {
+        char msg[320];
+        snprintf(msg, sizeof msg,
+                 "Registro o clase: el nombre del tipo '%s' no es válido (palabra reservada o inglés prohibido).",
+                 sd->name);
+        jb_emit_semantic_line(s, unit_sd, line0, col0, msg, errs);
+    }
+
+    for (size_t ex = 0; ex < sd->n_extends; ex++) {
+        const char *bn = sd->extends_names ? sd->extends_names[ex] : NULL;
+        if (!bn || !is_reserved_identifier(bn)) continue;
+        char msg[320];
+        snprintf(msg, sizeof msg,
+                 "Registro o clase '%s': en `extiende` el nombre '%s' no es válido (palabra reservada o inglés prohibido).",
+                 sd->name ? sd->name : "?", bn);
+        jb_emit_semantic_line(s, unit_sd, line0, col0, msg, errs);
+    }
+
+    for (size_t fi = 0; fi < sd->n_fields; fi++) {
+        const char *fnm = sd->field_names ? sd->field_names[fi] : NULL;
+        if (!fnm || !is_reserved_identifier(fnm)) continue;
+        char msg[320];
+        snprintf(msg, sizeof msg,
+                 "Registro o clase '%s': el campo '%s' no puede llamarse así (palabra reservada o inglés prohibido).",
+                 sd->name ? sd->name : "?", fnm);
+        jb_emit_semantic_line(s, unit_sd, line0, col0, msg, errs);
+    }
+
+    for (size_t mi = 0; mi < sd->n_methods; mi++) {
+        FunctionNode *m = sd->methods[mi] && sd->methods[mi]->type == NODE_FUNCTION
+                            ? (FunctionNode *)sd->methods[mi] : NULL;
+        if (!m) continue;
+        jb_precheck_function(s, m, sd->name, errs);
+    }
+
+    for (size_t nk = 0; nk < sd->n_nested_structs; nk++) {
+        if (sd->nested_structs[nk] && sd->nested_structs[nk]->type == NODE_STRUCT_DEF)
+            jb_precheck_struct_def(s, (StructDefNode *)sd->nested_structs[nk], errs);
+    }
+}
+
+/* Recorre el AST fusionado antes de codegen: muestra todas las declaraciones ilegales
+ * por identificador reservado (parámetro, variables locales y global, método, texto, ...). */
+static int merged_program_precheck_reserved_declarations(const ProgramNode *prog,
+                                                          const char *entry_diag_path,
+                                                          const char *entry_buf) {
+    if (!prog || !entry_diag_path) return 0;
+    JBReservedSnip s = {
+        entry_diag_path, entry_buf, NULL, NULL
+    };
+    int errs = 0;
+
+    for (size_t gi = 0; gi < prog->n_globals; gi++) {
+        ASTNode *g = prog->globals[gi];
+        if (!g) continue;
+        if (g->type == NODE_VAR_DECL)
+            jb_precheck_global_var(&s, (VarDeclNode *)g, &errs);
+        else if (g->type == NODE_STRUCT_DEF)
+            jb_precheck_struct_def(&s, (StructDefNode *)g, &errs);
+    }
+
+    for (size_t fi = 0; fi < prog->n_funcs; fi++) {
+        FunctionNode *fn = prog->functions[fi] && prog->functions[fi]->type == NODE_FUNCTION
+                              ? (FunctionNode *)prog->functions[fi] : NULL;
+        if (!fn) continue;
+        jb_precheck_function(&s, fn, NULL, &errs);
+    }
+
+    if (prog->main_block && prog->main_block->type == NODE_BLOCK)
+        jb_precheck_walk_block(&s, (BlockNode *)prog->main_block,
+                              NULL, "<principal>", &errs);
+
+    jb_rsv_snip_fini(&s);
+    return errs;
+}
+
 static int usar_path_is_absolute(const char *path) {
     if (!path || !path[0]) return 0;
 #ifdef _WIN32
@@ -595,7 +1177,7 @@ static int usar_path_is_absolute(const char *path) {
     return 0;
 }
 
-/* 0 = ok; 1 = error (falta archivo o ciclo). */
+/* Retorna cantidad de errores detectados en el subarbol de modulos `usar`. */
 static int process_usar_module_recursive(ProgramNode *main_p, const char *full_open_path,
     const char *referrer_diag_path, int usar_line, int usar_col,
     CodeGen *cg, UsarPathStack *stack, UsarLoadedSet *loaded,
@@ -682,6 +1264,7 @@ static int process_usar_module_recursive(ProgramNode *main_p, const char *full_o
     }
 
     ProgramNode *mp = (ProgramNode *)mast;
+    int errs = 0;
 
     /* PROCESAR DIRECTIVAS ENVIAR { ... } ANTES DE CUALQUIER OTRA COSA */
     for (size_t j = 0; j < mp->n_globals; j++) {
@@ -745,20 +1328,21 @@ static int process_usar_module_recursive(ProgramNode *main_p, const char *full_o
         int sub_err = process_usar_module_recursive(main_p, child_full, full_open_path,
             an->base.line, an->base.col, cg, stack, loaded, an, compile_entry_diag);
         if (sub_err) {
-            ast_free(mast);
-            free(mbuf);
-            usar_stack_pop(stack);
-            return 1;
+            errs += sub_err;
         }
     }
 
     if (import_spec && import_spec->import_kind == USAR_IMPORT_NAMES) {
         if (validate_named_imports_for_module(mp, import_spec, referrer_diag_path, usar_line, usar_col, full_open_path)) {
-            ast_free(mast);
-            free(mbuf);
-            usar_stack_pop(stack);
-            return 1;
+            errs += 1;
         }
+    }
+
+    if (errs > 0) {
+        ast_free(mast);
+        free(mbuf);
+        usar_stack_pop(stack);
+        return errs;
     }
 
     /* PROCESAR DIRECTIVAS ENVIAR { ... } ANTES DE FUSIONAR */
@@ -816,6 +1400,7 @@ static int process_usar_module_recursive(ProgramNode *main_p, const char *full_o
             for (size_t i = 0; i < mp->n_funcs; i++) {
                 FunctionNode *f = (FunctionNode *)mp->functions[i];
                 if (!f || !should_merge_function(f, mp, import_spec)) continue;
+                merger_assign_diag_unit(&f->diag_source_unit, full_open_path);
                 main_p->functions[w++] = (ASTNode *)f;
                 mp->functions[i] = NULL;
             }
@@ -835,6 +1420,11 @@ static int process_usar_module_recursive(ProgramNode *main_p, const char *full_o
         }
         
         if (!should_merge) continue;
+
+        if (g->type == NODE_STRUCT_DEF)
+            merger_assign_diag_struct_recursive((StructDefNode *)g, full_open_path);
+        else if (g->type == NODE_VAR_DECL)
+            merger_assign_diag_unit(&((VarDeclNode *)g)->diag_source_unit, full_open_path);
 
         size_t new_n = main_p->n_globals + 1;
         ASTNode **ng = realloc(main_p->globals, new_n * sizeof(ASTNode *));
@@ -906,7 +1496,7 @@ static int register_usar_modules(ProgramNode *p, const char *in_path, const char
             snprintf(full, sizeof(full), "%s%c%s", base_dir, PATH_SEP, rel);
         for (char *c = full; *c; c++) if (*c == '/') *c = PATH_SEP;
         int one = process_usar_module_recursive(p, full, diag_path, an->base.line, an->base.col, cg, &stack, &loaded, an, diag_path);
-        if (one) errs++;
+        if (one > 0) errs += one;
     }
 
     usar_stack_free(&stack);
@@ -933,6 +1523,8 @@ typedef struct {
     int col;
     int depth;
     int used;
+    int kind; /* 0=variable, 1=clase, 2=registro, 3=concepto, 4=funcion */
+    char *diag_source_unit;
 } UnusedDecl;
 
 typedef struct {
@@ -1151,6 +1743,17 @@ static void callees_collect_stmt(ASTNode *node, CalleeVec *v) {
             callees_collect_block(tn->final_body, v);
             break;
         }
+        case NODE_STRUCT_DEF: {
+            StructDefNode *sd = (StructDefNode*)node;
+            for (size_t i = 0; i < sd->n_methods; i++) {
+                FunctionNode *fn = (FunctionNode*)sd->methods[i];
+                if (fn) callees_collect_block(fn->body, v);
+            }
+            for (size_t i = 0; i < sd->n_nested_structs; i++) {
+                callees_collect_stmt(sd->nested_structs[i], v);
+            }
+            break;
+        }
         default:
             callees_collect_expr(node, v);
             break;
@@ -1184,19 +1787,39 @@ static int warn_unused_functions(const char *in_path, const char *source_text, A
 
         int line = fn->base.line > 0 ? fn->base.line : 1;
         int col = fn->base.col > 0 ? fn->base.col : 1;
+        const char *target_path = fn->diag_source_unit ? fn->diag_source_unit : in_path;
         char head[2048];
         if (werror_unused) {
             snprintf(head, sizeof head,
                      "Archivo %s, linea %d, columna %d: error semantico: funcion `%s` definida pero no usada ni enviada con `enviar`.",
-                     in_path, line, col, fn->name);
+                     target_path, line, col, fn->name);
             err_count++;
         } else {
             snprintf(head, sizeof head,
                      "Archivo %s, linea %d, columna %d: aviso: funcion `%s` definida pero no usada ni enviada con `enviar`.",
-                     in_path, line, col, fn->name);
+                     target_path, line, col, fn->name);
         }
-        if (source_text) {
-            char *full = diag_attach_snippet(source_text, line, col, head);
+        
+        const char *current_source = source_text;
+        char *external_source = NULL;
+        if (fn->diag_source_unit) {
+            FILE *f = fopen(fn->diag_source_unit, "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                long len = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                external_source = malloc(len + 1);
+                if (external_source) {
+                    fread(external_source, 1, len, f);
+                    external_source[len] = '\0';
+                    current_source = external_source;
+                }
+                fclose(f);
+            }
+        }
+
+        if (current_source) {
+            char *full = diag_attach_snippet(current_source, line, col, head);
             if (full) {
                 fprintf(stderr, "%s%s%s", werror_unused ? ANSI_RED : ANSI_YELLOW, full, ANSI_RESET);
                 if (full[0] && full[strlen(full) - 1] != '\n') fputc('\n', stderr);
@@ -1205,13 +1828,15 @@ static int warn_unused_functions(const char *in_path, const char *source_text, A
                 fprintf(stderr, "%s%s%s\n", werror_unused ? ANSI_RED : ANSI_YELLOW, head, ANSI_RESET);
         } else
             fprintf(stderr, "%s%s%s\n", werror_unused ? ANSI_RED : ANSI_YELLOW, head, ANSI_RESET);
+        
+        if (external_source) free(external_source);
     }
 
     callee_vec_free(&callees);
     return err_count;
 }
 
-static void unused_vec_push(UnusedDeclVec *v, const char *name, int line, int col, int depth) {
+static void unused_vec_push(UnusedDeclVec *v, const char *name, int line, int col, int depth, int kind, char *diag_source_unit) {
     if (!v || !name) return;
     if (v->n == v->cap) {
         size_t nc = v->cap ? v->cap * 2 : 32;
@@ -1225,6 +1850,8 @@ static void unused_vec_push(UnusedDeclVec *v, const char *name, int line, int co
     v->arr[v->n].col = col;
     v->arr[v->n].depth = depth;
     v->arr[v->n].used = 0;
+    v->arr[v->n].kind = kind;
+    v->arr[v->n].diag_source_unit = diag_source_unit ? strdup(diag_source_unit) : NULL;
     v->n++;
 }
 
@@ -1409,7 +2036,15 @@ static void unused_scan_stmt(ASTNode *node, UnusedDeclVec *decls, int *depth) {
     switch (node->type) {
         case NODE_VAR_DECL: {
             VarDeclNode *vd = (VarDeclNode*)node;
-            if (vd->name) unused_vec_push(decls, vd->name, node->line, node->col, *depth);
+            if (vd->name) {
+                /* No avisar "no usada" para variables globales exportadas (`enviar`) */
+                if (vd->is_exported && *depth == 1) {
+                    /* Ignorar */
+                } else {
+                    unused_vec_push(decls, vd->name, node->line, node->col, *depth, 0, vd->diag_source_unit);
+                }
+            }
+            if (vd->type_name) unused_vec_mark_used(decls, vd->type_name, *depth);
             if (vd->value) unused_scan_expr(vd->value, decls, *depth);
             break;
         }
@@ -1425,7 +2060,7 @@ static void unused_scan_stmt(ASTNode *node, UnusedDeclVec *decls, int *depth) {
             break;
         case NODE_INPUT: {
             InputNode *in = (InputNode*)node;
-            if (in->variable) unused_vec_push(decls, in->variable, node->line, node->col, *depth);
+            if (in->variable) unused_vec_push(decls, in->variable, node->line, node->col, *depth, 0, NULL);
             break;
         }
         case NODE_IF: {
@@ -1441,12 +2076,21 @@ static void unused_scan_stmt(ASTNode *node, UnusedDeclVec *decls, int *depth) {
             unused_scan_block(wn->body, decls, depth);
             break;
         }
+        case NODE_FOR: {
+            ForNode *fn = (ForNode*)node;
+            if (fn->init) unused_scan_stmt(fn->init, decls, depth);
+            if (fn->condition) unused_scan_expr(fn->condition, decls, *depth);
+            if (fn->step) unused_scan_expr(fn->step, decls, *depth);
+            unused_scan_block(fn->body, decls, depth);
+            break;
+        }
         case NODE_FOREACH: {
             ForEachNode *fe = (ForEachNode *)node;
             if (fe->collection) unused_scan_expr(fe->collection, decls, *depth);
+            if (fe->iter_type) unused_vec_mark_used(decls, fe->iter_type, *depth);
             (*depth)++;
             if (fe->iter_name)
-                unused_vec_push(decls, fe->iter_name, fe->base.line, fe->base.col, *depth);
+                unused_vec_push(decls, fe->iter_name, fe->base.line, fe->base.col, *depth, 0, NULL);
             unused_scan_block(fe->body, decls, depth);
             (*depth)--;
             break;
@@ -1473,11 +2117,57 @@ static void unused_scan_stmt(ASTNode *node, UnusedDeclVec *decls, int *depth) {
             unused_scan_block(tn->try_body, decls, depth);
             if (tn->catch_body) {
                 (*depth)++;
-                if (tn->catch_var) unused_vec_push(decls, tn->catch_var, node->line, node->col, *depth);
+                if (tn->catch_var) unused_vec_push(decls, tn->catch_var, node->line, node->col, *depth, 0, NULL);
                 unused_scan_block(tn->catch_body, decls, depth);
                 (*depth)--;
             }
             unused_scan_block(tn->final_body, decls, depth);
+            break;
+        }
+        case NODE_STRUCT_DEF: {
+            StructDefNode *sd = (StructDefNode*)node;
+            // Registrar el nombre de la clase/registro como declaración global (depth 1)
+            if (sd->name) {
+                if (sd->is_exported) {
+                    /* Ignorar */
+                } else {
+                    unused_vec_push(decls, sd->name, node->line, node->col, 1, sd->is_clase ? 1 : 2, sd->diag_source_unit);
+                }
+            }
+            
+            // Marcar bases como usadas
+            for (size_t i = 0; i < sd->n_extends; i++) {
+                if (sd->extends_names[i]) unused_vec_mark_used(decls, sd->extends_names[i], 1);
+            }
+
+            // Escanear métodos para encontrar usos de variables
+            int old_depth = *depth;
+            for (size_t i = 0; i < sd->n_methods; i++) {
+                FunctionNode *fn = (FunctionNode*)sd->methods[i];
+                if (!fn) continue;
+                *depth = 2; // Profundidad de parámetros/locales de método
+                for (size_t j = 0; j < fn->n_params; j++) {
+                    VarDeclNode *vd = (VarDeclNode*)fn->params[j];
+                    if (vd && vd->name) unused_vec_push(decls, vd->name, vd->base.line, vd->base.col, *depth, 0, vd->diag_source_unit);
+                }
+                unused_scan_block(fn->body, decls, depth);
+            }
+            
+            // Escanear structs anidados
+            *depth = old_depth;
+            for (size_t i = 0; i < sd->n_nested_structs; i++) {
+                unused_scan_stmt(sd->nested_structs[i], decls, depth);
+            }
+            break;
+        }
+        case NODE_DEFINE_CONCEPTO: {
+            DefineConceptoNode *dc = (DefineConceptoNode*)node;
+            // Si el concepto es un identificador, marcarlo como declaración
+            if (dc->concepto && dc->concepto->type == NODE_IDENTIFIER) {
+                IdentifierNode *id = (IdentifierNode*)dc->concepto;
+                unused_vec_push(decls, id->name, id->line, id->col, 1, 3, NULL);
+            }
+            if (dc->descripcion) unused_scan_expr(dc->descripcion, decls, *depth);
             break;
         }
         default:
@@ -1501,7 +2191,7 @@ static int warn_unused_variables(const char *in_path, const char *source_text, A
         depth = 2;
         for (size_t j = 0; j < fn->n_params; j++) {
             VarDeclNode *vd = (VarDeclNode*)fn->params[j];
-            if (vd && vd->name) unused_vec_push(&decls, vd->name, vd->base.line, vd->base.col, depth);
+            if (vd && vd->name) unused_vec_push(&decls, vd->name, vd->base.line, vd->base.col, depth, 0, vd->diag_source_unit);
         }
         unused_scan_block(fn->body, &decls, &depth);
     }
@@ -1515,18 +2205,45 @@ static int warn_unused_variables(const char *in_path, const char *source_text, A
         UnusedDecl *d = &decls.arr[i];
         if (!d->used && d->name && d->line > 0 && d->col > 0) {
             char head[2048];
+            const char *kind_str = "variable";
+            if (d->kind == 1) kind_str = "clase";
+            else if (d->kind == 2) kind_str = "registro";
+            else if (d->kind == 3) kind_str = "concepto";
+            else if (d->kind == 4) kind_str = "funcion";
+
+            const char *target_path = d->diag_source_unit ? d->diag_source_unit : in_path;
             if (werror_unused) {
                 snprintf(head, sizeof head,
-                         "Archivo %s, linea %d, columna %d: error semantico: variable `%s` declarada pero no usada.",
-                         in_path, d->line, d->col, d->name);
+                         "Archivo %s, linea %d, columna %d: error semantico: %s `%s` declarada pero no usada.",
+                         target_path, d->line, d->col, kind_str, d->name);
                 err_count++;
             } else {
                 snprintf(head, sizeof head,
-                         "Archivo %s, linea %d, columna %d: aviso: variable `%s` declarada pero no usada.",
-                         in_path, d->line, d->col, d->name);
+                         "Archivo %s, linea %d, columna %d: aviso: %s `%s` declarada pero no usada.",
+                         target_path, d->line, d->col, kind_str, d->name);
             }
-            if (source_text) {
-                char *full = diag_attach_snippet(source_text, d->line, d->col, head);
+            
+            /* Cargar texto de origen si es de un modulo externo */
+            const char *current_source = source_text;
+            char *external_source = NULL;
+            if (d->diag_source_unit) {
+                FILE *f = fopen(d->diag_source_unit, "rb");
+                if (f) {
+                    fseek(f, 0, SEEK_END);
+                    long len = ftell(f);
+                    fseek(f, 0, SEEK_SET);
+                    external_source = malloc(len + 1);
+                    if (external_source) {
+                        fread(external_source, 1, len, f);
+                        external_source[len] = '\0';
+                        current_source = external_source;
+                    }
+                    fclose(f);
+                }
+            }
+
+            if (current_source) {
+                char *full = diag_attach_snippet(current_source, d->line, d->col, head);
                 if (full) {
                     fprintf(stderr, "%s%s%s", werror_unused ? ANSI_RED : ANSI_YELLOW, full, ANSI_RESET);
                     if (full[0] && full[strlen(full) - 1] != '\n') fputc('\n', stderr);
@@ -1537,8 +2254,10 @@ static int warn_unused_variables(const char *in_path, const char *source_text, A
             } else {
                 fprintf(stderr, "%s%s%s\n", werror_unused ? ANSI_RED : ANSI_YELLOW, head, ANSI_RESET);
             }
+            if (external_source) free(external_source);
         }
         free(d->name);
+        if (d->diag_source_unit) free(d->diag_source_unit);
     }
     free(decls.arr);
     return err_count;
@@ -1618,6 +2337,7 @@ static int validate_function_returns_and_warnings(const char *in_path, const cha
 
 /* Compila archivo jasb -> binario, devuelve 0 si OK */
 int do_compile(const char *in_path, const char *out_path, char **err_msg) {
+    jb_init_console_unicode();
     extern int werror_unused;
     char in_path_abs[2048] = {0};
     const char *diag_path = in_path;
@@ -1719,6 +2439,18 @@ int do_compile(const char *in_path, const char *out_path, char **err_msg) {
         return 1;
     }
 
+    int rsv_batch = merged_program_precheck_reserved_declarations((ProgramNode *)ast, diag_path, buf);
+    if (rsv_batch > 0) {
+        fprintf(stderr, "%sCompilacion fallida: %d error(es) semantico(s) por identificadores no permitidos o palabras reservadas (corrija todas las apariciones antes de recompilar).%s\n",
+                ANSI_RED, rsv_batch, ANSI_RESET);
+        codegen_free(cg);
+        ast_free(ast);
+        parser_free(&par);
+        token_vec_free(&tvec);
+        free(buf);
+        return 1;
+    }
+
     // El CLI maneja este argumento antes de llamar a do_compile, por lo que estara globalmente disponible.
     int sem_errs = 0;
     {
@@ -1740,6 +2472,12 @@ int do_compile(const char *in_path, const char *out_path, char **err_msg) {
     if (resolve_program(ast, &sym) > 0) {
         fprintf(stderr, "%sCompilacion fallida: error al registrar clases/registros (herencia o orden de tipos).%s\n",
                 ANSI_RED, ANSI_RESET);
+        
+        /* Ejecutar avisos de no usados aunque falle el registro de tipos, para que la extension 
+         * de VS Code mantenga los diagnosticos estables mientras el usuario escribe. */
+        warn_unused_variables(diag_path, buf, ast);
+        warn_unused_functions(diag_path, buf, ast);
+
         codegen_free(cg);
         ast_free(ast);
         sym_free(&sym);
@@ -1762,22 +2500,88 @@ int do_compile(const char *in_path, const char *out_path, char **err_msg) {
     size_t len;
     uint8_t *bin = codegen_generate(cg, ast, &len);
     if (!bin) {
-        int err_line, err_col;
-        const char *cerr = codegen_get_error(cg, &err_line, &err_col);
-        if (cerr) {
-            int col_snip = err_col >= 1 ? err_col : 1;
-            if (buf && err_line >= 1) {
-                char head[2048];
-                snprintf(head, sizeof head, "Archivo %s, linea %d, columna %d: error semantico: %s", diag_path, err_line, col_snip, cerr);
-                char *full = diag_attach_snippet(buf, err_line, col_snip, head);
-                fprintf(stderr, "%s%s%s", ANSI_RED, full ? full : head, ANSI_RESET);
-                if (full && full[0] && full[strlen(full) - 1] != '\n')
-                    fputc('\n', stderr);
-                free(full);
-            } else {
-                fprintf(stderr, "%sArchivo %s: error semantico (generacion de codigo): %s%s\n", ANSI_RED, diag_path, cerr, ANSI_RESET);
+        size_t nd = codegen_collected_diag_count(cg);
+        if (nd > 0) {
+            fprintf(stderr,
+                    "%sSe encontraron %zu error(es) semanticos durante la compilacion.%s\n",
+                    ANSI_RED, nd, ANSI_RESET);
+            char *cached_mod_buf = NULL;
+            const char *cached_mod_unit = NULL;
+            for (size_t di = 0; di < nd; di++) {
+                const char *dm = NULL;
+                int dl = 1, dc = 1;
+                const char *du = NULL;
+                codegen_collected_diag_at(cg, di, &dm, &dl, &dc, &du);
+                if (!dm) dm = "?";
+                int col_snip = dc >= 1 ? dc : 1;
+                const char *path_sem = (du && du[0]) ? du : diag_path;
+                const char *snippet_src = buf;
+                if (du && du[0] && diag_path && !jb_paths_same_file(du, diag_path)) {
+                    if (cached_mod_unit && jb_paths_same_file(du, cached_mod_unit))
+                        snippet_src = cached_mod_buf ? cached_mod_buf : buf;
+                    else {
+                        free(cached_mod_buf);
+                        cached_mod_buf = jb_read_utf8_file(du);
+                        cached_mod_unit = du;
+                        snippet_src = cached_mod_buf ? cached_mod_buf : buf;
+                    }
+                }
+                if (snippet_src && dl >= 1) {
+                    char head[2048];
+                    snprintf(head, sizeof head, "[%zu/%zu] Archivo %s, linea %d, columna %d: error semantico: %s",
+                             di + 1, nd, path_sem, dl, col_snip, dm);
+                    char *full = diag_attach_snippet(snippet_src, dl, col_snip, head);
+                    fprintf(stderr, "%s%s%s", ANSI_RED, full ? full : head, ANSI_RESET);
+                    if (full && full[0] && full[strlen(full) - 1] != '\n')
+                        fputc('\n', stderr);
+                    free(full);
+                } else {
+                    fprintf(stderr, "%s[%zu/%zu] Archivo %s, linea %d, columna %d: error semantico: %s%s\n",
+                           ANSI_RED, di + 1, nd, path_sem, dl >= 1 ? dl : 1, col_snip, dm, ANSI_RESET);
+                }
+            }
+            free(cached_mod_buf);
+        } else {
+            int err_line, err_col;
+            const char *cerr = codegen_get_error(cg, &err_line, &err_col);
+            const char *cerr_unit = codegen_get_error_unit_path(cg);
+            if (cerr) {
+                int col_snip = err_col >= 1 ? err_col : 1;
+                const char *path_sem = cerr_unit ? cerr_unit : diag_path;
+                char *snippet_module = NULL;
+                const char *snippet_src = buf;
+                if (cerr_unit && cerr_unit[0] && diag_path &&
+                    !jb_paths_same_file(cerr_unit, diag_path)) {
+                    snippet_module = jb_read_utf8_file(cerr_unit);
+                    if (snippet_module)
+                        snippet_src = snippet_module;
+                    else
+                        snippet_src = NULL;
+                }
+                if (snippet_src && err_line >= 1) {
+                    char head[2048];
+                    snprintf(head, sizeof head, "Archivo %s, linea %d, columna %d: error semantico: %s",
+                             path_sem, err_line, col_snip, cerr);
+                    char *full = diag_attach_snippet(snippet_src, err_line, col_snip, head);
+                    fprintf(stderr, "%s%s%s", ANSI_RED, full ? full : head, ANSI_RESET);
+                    if (full && full[0] && full[strlen(full) - 1] != '\n')
+                        fputc('\n', stderr);
+                    free(full);
+                } else {
+                    fprintf(stderr, "%sArchivo %s, linea %d, columna %d: error semantico: %s%s\n",
+                           ANSI_RED, path_sem,
+                           err_line >= 1 ? err_line : 1, col_snip, cerr,
+                           ANSI_RESET);
+                }
+                free(snippet_module);
             }
         }
+        
+        /* Ejecutar avisos de no usados aunque falle codegen, para que la extension 
+         * de VS Code mantenga los diagnosticos estables mientras el usuario escribe. */
+        warn_unused_variables(diag_path, buf, ast);
+        warn_unused_functions(diag_path, buf, ast);
+
         codegen_free(cg);
         ast_free(ast); sym_free(&sym); parser_free(&par); token_vec_free(&tvec); free(buf); return 1;
     }
@@ -2215,6 +3019,7 @@ static int run_vm(const char *bin_path, const char *ruta_cerebro, const char *cw
 
 int main(int argc, char **argv) {
     init_jbc_exe_dir();
+    jb_init_console_unicode();
     const char *input = NULL;
     const char *output = NULL;
     int do_execute = 0;
@@ -2285,6 +3090,7 @@ int main(int argc, char **argv) {
 #else
 int main(int argc, char **argv) {
     init_jbc_exe_dir();
+    jb_init_console_unicode();
     const char *input_file = NULL;
     const char *output_file = NULL;  /* se deriva del input si no se da -o */
     int do_execute = 0;

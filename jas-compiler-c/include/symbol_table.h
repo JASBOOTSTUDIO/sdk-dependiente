@@ -82,8 +82,11 @@ void sym_init_global(SymbolTable *st);
 void sym_enter_scope(SymbolTable *st, int is_function);
 int sym_exit_scope(SymbolTable *st);
 
-/* 3.2/3.3 Variables y parámetros (3.4 is_param en declare) */
-SymResult sym_declare(SymbolTable *st, const char *name, const char *type_name, size_t size, int is_param, int is_const, const char *lista_elem_type);
+/* 3.2/3.3 Variables y parámetros (3.4 is_param en declare)
+ * sym_flags: 0 = normal; SYMDECL_FLAGS_ALLOW_RESERVED_NAME solo para nombres inyectados por el compilador (resultado, este, padre). */
+#define SYMDECL_FLAGS_NONE                0
+#define SYMDECL_FLAGS_ALLOW_RESERVED_NAME 1
+SymResult sym_declare(SymbolTable *st, const char *name, const char *type_name, size_t size, int is_param, int is_const, const char *lista_elem_type, int sym_flags);
 SymResult sym_declare_macro(SymbolTable *st, const char *name, void *macro_ast);
 SymResult sym_reserve_temp(SymbolTable *st, size_t size);
 int sym_is_parameter(SymbolTable *st, const char *name);

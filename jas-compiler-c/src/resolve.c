@@ -76,15 +76,15 @@ static void resolve_struct_methods_recursive(SymbolTable *st, ASTNode *node) {
         FunctionNode *fn = (FunctionNode *)sd->methods[j];
         sym_enter_scope(st, 1);
         /* 'este' apunta a la instancia de la clase */
-        sym_declare(st, "este", sd->name, 8, 1, 0, NULL);
+        sym_declare(st, "este", sd->name, 8, 1, 0, NULL, SYMDECL_FLAGS_ALLOW_RESERVED_NAME);
         if (sd->n_extends > 0) {
             /* 'padre' apunta a la misma instancia pero con el tipo de la primera clase base */
-            sym_declare(st, "padre", sd->extends_names[0], 8, 1, 0, NULL);
+            sym_declare(st, "padre", sd->extends_names[0], 8, 1, 0, NULL, SYMDECL_FLAGS_ALLOW_RESERVED_NAME);
         }
         for (size_t k = 0; k < fn->n_params; k++) {
             VarDeclNode *vd = (VarDeclNode *)fn->params[k];
             if (vd)
-                sym_declare(st, vd->name, vd->type_name, 8, 1, 0, vd->list_element_type);
+                sym_declare(st, vd->name, vd->type_name, 8, 1, 0, vd->list_element_type, SYMDECL_FLAGS_NONE);
         }
         resolve_block(fn->body, st);
         sym_exit_scope(st);
@@ -164,7 +164,7 @@ int resolve_program(ASTNode *ast, SymbolTable *st) {
         if (g && g->type == NODE_VAR_DECL) {
             VarDeclNode *vd = (VarDeclNode *)g;
             size_t sz = type_size(st, vd->type_name);
-            sym_declare(st, vd->name, vd->type_name, sz, 0, vd->is_const ? 1 : 0, vd->list_element_type);
+            sym_declare(st, vd->name, vd->type_name, sz, 0, vd->is_const ? 1 : 0, vd->list_element_type, SYMDECL_FLAGS_NONE);
         }
     }
 
@@ -182,7 +182,7 @@ int resolve_program(ASTNode *ast, SymbolTable *st) {
         for (size_t j = 0; j < fn->n_params; j++) {
             VarDeclNode *vd = (VarDeclNode *)fn->params[j];
             if (vd)
-                sym_declare(st, vd->name, vd->type_name, 8, 1, 0, vd->list_element_type);
+                sym_declare(st, vd->name, vd->type_name, 8, 1, 0, vd->list_element_type, SYMDECL_FLAGS_NONE);
         }
         resolve_block(fn->body, st);
         int func_unused = sym_exit_scope(st);
@@ -209,7 +209,7 @@ static void resolve_statement(ASTNode *node, SymbolTable *st) {
         case NODE_INPUT: {
             InputNode *in = (InputNode *)node;
             if (in->variable)
-                sym_declare(st, in->variable, "texto", 8, 0, 0, NULL);
+                sym_declare(st, in->variable, "texto", 8, 0, 0, NULL, SYMDECL_FLAGS_NONE);
             break;
         }
         case NODE_VAR_DECL: {
@@ -218,7 +218,7 @@ static void resolve_statement(ASTNode *node, SymbolTable *st) {
                 sym_declare_macro(st, vd->name, vd->value);
             } else {
                 size_t sz = type_size(st, vd->type_name);
-                sym_declare(st, vd->name, vd->type_name, sz, 0, vd->is_const ? 1 : 0, vd->list_element_type);
+                sym_declare(st, vd->name, vd->type_name, sz, 0, vd->is_const ? 1 : 0, vd->list_element_type, SYMDECL_FLAGS_NONE);
             }
             break;
         }
@@ -226,7 +226,7 @@ static void resolve_statement(ASTNode *node, SymbolTable *st) {
             ForEachNode *fe = (ForEachNode *)node;
             sym_enter_scope(st, 0);
             if (fe->iter_name && fe->iter_type)
-                sym_declare(st, fe->iter_name, fe->iter_type, 8, 0, 0, NULL);
+                sym_declare(st, fe->iter_name, fe->iter_type, 8, 0, 0, NULL, SYMDECL_FLAGS_NONE);
             resolve_block(fe->body, st);
             sym_exit_scope(st);
             break;

@@ -30,7 +30,7 @@ set SRC_DIR=src
 set JMN_DIR=%JMN_PKG%\src\memoria_neuronal
 set COMPAT_SRC=%JMN_PKG%\src\platform_compat.c
 set BIN_DIR=bin
-set CFLAGS=-Wall -Wextra -std=c11 -O3 -flto -march=native -I%SRC_DIR% -I%JMN_PKG%\src -I%JMN_PKG%\src\memoria_neuronal -DJASBOOT_LANG_INTEGRATION
+set CFLAGS=-Wall -Wextra -std=c11 -O3 -march=native -I%SRC_DIR% -I%JMN_PKG%\src -I%JMN_PKG%\src\memoria_neuronal -DJASBOOT_LANG_INTEGRATION
 set LDLIBS=
 if /I "%OS%"=="Windows_NT" set LDLIBS=-lws2_32
 
@@ -59,7 +59,7 @@ echo Compiling Compat...
 gcc %CFLAGS% -c %COMPAT_SRC% -o %BUILD_DIR%/jmn_compat.o || exit /b 1
 
 echo Linking...
-gcc -O3 -flto -march=native %BUILD_DIR%/*.o -o %BIN_DIR%/jasboot-ir-vm-trace.exe %LDLIBS% || exit /b 1
+gcc -O3 -march=native %BUILD_DIR%/*.o -o %BIN_DIR%/jasboot-ir-vm-trace.exe %LDLIBS% || exit /b 1
 copy /Y %BIN_DIR%\jasboot-ir-vm-trace.exe %BIN_DIR%\jasboot-ir-vm.exe >nul
 if errorlevel 1 (
   echo AVISO: no se pudo copiar a jasboot-ir-vm.exe ^(posible bloqueo^). Ejecutable actualizado: jasboot-ir-vm-trace.exe

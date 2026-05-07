@@ -26,6 +26,7 @@ void ast_free(ASTNode *node) {
         }
         case NODE_FUNCTION: {
             FunctionNode *n = (FunctionNode*)node;
+            free_str(n->diag_source_unit);
             free_str(n->name);
             free_str(n->return_type);
             free_str(n->return_task_elem);
@@ -36,6 +37,7 @@ void ast_free(ASTNode *node) {
         }
         case NODE_VAR_DECL: {
             VarDeclNode *n = (VarDeclNode*)node;
+            free_str(n->diag_source_unit);
             free_str(n->type_name);
             free_str(n->name);
             free_str(n->list_element_type);
@@ -44,6 +46,7 @@ void ast_free(ASTNode *node) {
         }
         case NODE_STRUCT_DEF: {
             StructDefNode *n = (StructDefNode*)node;
+            free_str(n->diag_source_unit);
             free_str(n->name);
             for (size_t i = 0; i < n->n_extends; i++) {
                 free_str(n->extends_names[i]);

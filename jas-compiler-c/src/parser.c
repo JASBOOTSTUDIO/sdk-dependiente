@@ -202,32 +202,7 @@ static const char *token_union_str(const Token *t) {
 /* por compatibilidad historica (p. ej. "a" en formulas) o constructores vec/mat. Las llamadas sistema
    se escriben como identificador-primario en parse_primary. */
 static int keyword_ok_as_user_identifier(const char *s) {
-    if (!s) return 0;
-    size_t L = strlen(s);
-    return (strcmp(s, "vec2") == 0 || strcmp(s, "vec3") == 0 ||
-            strcmp(s, "vec4") == 0 || strcmp(s, "mat4") == 0 || strcmp(s, "mat3") == 0 ||
-            strcmp(s, "entrada") == 0 || strcmp(s, "texto") == 0 ||
-            strcmp(s, "caracter") == 0 || strcmp(s, "bool") == 0 ||
-            strcmp(s, "lista") == 0 || strcmp(s, "mapa") == 0 ||
-            strcmp(s, "entero") == 0 || strcmp(s, "flotante") == 0 ||
-            strcmp(s, "u32") == 0 || strcmp(s, "u64") == 0 ||
-            strcmp(s, "u8") == 0 || strcmp(s, "byte") == 0 ||
-            strcmp(s, "bytes") == 0 || strcmp(s, "padre") == 0 ||
-            strcmp(s, "a") == 0 || strcmp(s, "de") == 0 ||
-            strcmp(s, "con") == 0 || strcmp(s, "o") == 0 ||
-            strcmp(s, "y") == 0 || strcmp(s, "que") == 0 ||
-            strcmp(s, "como") == 0 || strcmp(s, "todo") == 0 ||
-            strcmp(s, "todas") == 0 || strcmp(s, "sobre") == 0 ||
-            strcmp(s, "valor") == 0 || strcmp(s, "peso") == 0 ||
-            strcmp(s, "igual") == 0 || strcmp(s, "es") == 0 ||
-            strcmp(s, "entonces") == 0 || strcmp(s, "retorna") == 0 ||
-            strcmp(s, "mayor") == 0 || strcmp(s, "menor") == 0 ||
-            strcmp(s, "distinto") == 0 || strcmp(s, "hacer") == 0 ||
-            strcmp(s, "json") == 0 || strcmp(s, "objeto") == 0 ||
-            strcmp(s, "decimal") == 0 || strcmp(s, "registro") == 0 ||
-            strcmp(s, "clase") == 0 || strcmp(s, "privado") == 0 ||
-            strcmp(s, "caso") == 0 || strcmp(s, "defecto") == 0 ||
-            is_sistema_llamada(s, L));
+    return !is_reserved_identifier(s);
 }
 
 /* Variable, parametro, constante, campo: no usar KEYWORDS salvo excepciones anteriores. */
@@ -305,7 +280,7 @@ static int is_decl_type_token(const Token *t) {
             strcmp(s, "socket") == 0 || strcmp(s, "tls") == 0 ||
             strcmp(s, "http_solicitud") == 0 || strcmp(s, "http_respuesta") == 0 ||
             strcmp(s, "http_servidor") == 0 ||
-            strcmp(s, "objeto") == 0);
+            strcmp(s, "objeto") == 0 || strcmp(s, "elemento") == 0);
 }
 
 /* Tras consumir el token `lista`: si sigue `<T>`, lo parsea (obligatorio cerrar bien). Si no hay `<`, devuelve NULL. */
@@ -316,17 +291,23 @@ static char *parse_optional_lista_element_type(Parser *p) {
     if (!match(p, TOK_OPERATOR, "<"))
         return NULL;
     const Token *inner = peek(p, 0);
-    if (!inner || inner->type != TOK_KEYWORD || !inner->value.str) {
+    if (!inner || (inner->type != TOK_KEYWORD && inner->type != TOK_IDENTIFIER) || !inner->value.str) {
         set_error_here(p, inner ? inner : peek(p, 0),
-                       "En `lista<T>` se esperaba un tipo T (entero, flotante, texto, bool) despues de '<'.");
+                       "En `lista/mapa<T>` se esperaba un tipo T despues de '<'.");
         return NULL;
     }
-    static const char *ok[] = {"entero", "flotante", "texto", "bool", "byte", "bytes", "mapa", "lista", NULL};
+    static const char *ok[] = {"entero", "flotante", "texto", "bool", "byte", "bytes", "mapa", "lista", "elemento", NULL};
     int good = 0;
     for (int i = 0; ok[i]; i++)
         if (strcmp(inner->value.str, ok[i]) == 0) good = 1;
+    
+    // Si no es un tipo primitivo, permitir si es un identificador (tipo de usuario como un registro)
+    if (!good && (inner->type == TOK_IDENTIFIER || inner->type == TOK_KEYWORD)) {
+        good = 1;
+    }
+
     if (!good) {
-        set_error_here(p, inner, "lista<T>: T debe ser entero, flotante, texto, bool, byte o bytes.");
+        set_error_here(p, inner, "lista/mapa<T>: T debe ser un tipo valido.");
         return NULL;
     }
     char *s = strdup(inner->value.str);
@@ -413,6 +394,9 @@ static ASTNode *make_identifier(const char *s, int line, int col) {
     n->name = strdup_safe(s);
     n->line = line;
     n->col = col;
+    /* Mantener base.line/col alineados: muchos recorridos usan ASTNode* y leen node->line/col (campos de base). */
+    n->base.line = line;
+    n->base.col = col;
     return (ASTNode*)n;
 }
 
@@ -444,6 +428,7 @@ static ASTNode *clone_identifier_for_compound(IdentifierNode *id) {
 static ASTNode *parse_expression(Parser *p);
 static ASTNode *parse_statement(Parser *p);
 static ASTNode *parse_block(Parser *p, const char **end_kw, size_t n_end);
+static ASTNode *parse_struct_body(Parser *p, int is_clase, int is_exported);
 
 typedef struct {
     ASTNode **arr;
@@ -482,8 +467,8 @@ static ASTNode *make_return_stmt(ASTNode *expr, int line, int col);
 static ASTNode *make_print_stmt(ASTNode *expr, int line, int col);
 static ASTNode *make_block_node(ASTNode **stmts, size_t n, int line, int col);
 static ASTNode *make_if_stmt(ASTNode *cond, ASTNode *body, ASTNode *else_body, int line, int col);
-static ASTNode *make_var_decl_simple(const char *type_name, const char *name, ASTNode *value, int line, int col);
-static ASTNode *make_function_node_simple(const char *name, const char *return_type, ASTNode **params, size_t n_params, ASTNode *body, int line, int col);
+static ASTNode *make_var_decl_simple(const char *type_name, const char *name, ASTNode *value, int line, int col, const char *source_path);
+static ASTNode *make_function_node_simple(const char *name, const char *return_type, ASTNode **params, size_t n_params, ASTNode *body, int line, int col, const char *source_path);
 static ASTNode *make_concat_expr(ASTNode *left, ASTNode *right, int line, int col);
 static const char *literal_text_value(ASTNode *node);
 static ASTNode *join_markup_exprs(ASTNode **exprs, size_t n, int line, int col);
@@ -794,7 +779,7 @@ static ASTNode *parse_estructura_theme_v2(Parser *p) {
     ASTNode **stmts = calloc(1, sizeof(ASTNode *));
     stmts[0] = make_return_stmt(make_call_named("estructura_tema", args, 6, theme_tok->line, theme_tok->column), theme_tok->line, theme_tok->column);
     ASTNode *body = make_block_node(stmts, 1, theme_tok->line, theme_tok->column);
-    ASTNode *fn = make_function_node_simple(name, "texto", NULL, 0, body, theme_tok->line, theme_tok->column);
+    ASTNode *fn = make_function_node_simple(name, "texto", NULL, 0, body, theme_tok->line, theme_tok->column, p->source_path);
     free(name);
     return fn;
 theme_fail:
@@ -988,7 +973,7 @@ static ASTNode *parse_estructura_component(Parser *p) {
     ASTNode **stmts = calloc(1, sizeof(ASTNode *));
     stmts[0] = make_return_stmt(body_expr, comp_tok->line, comp_tok->column);
     ASTNode *body_block = make_block_node(stmts, 1, comp_tok->line, comp_tok->column);
-    ASTNode *fn = make_function_node_simple(name, "texto", params.arr, params.n, body_block, comp_tok->line, comp_tok->column);
+    ASTNode *fn = make_function_node_simple(name, "texto", params.arr, params.n, body_block, comp_tok->line, comp_tok->column, p->source_path);
     free(name);
     return fn;
 }
@@ -1028,7 +1013,7 @@ static ASTNode *parse_estructura_component_v2(Parser *p) {
     ASTNode **stmts = calloc(1, sizeof(ASTNode *));
     stmts[0] = make_return_stmt(body_expr, comp_tok->line, comp_tok->column);
     ASTNode *body_block = make_block_node(stmts, 1, comp_tok->line, comp_tok->column);
-    ASTNode *fn = make_function_node_simple(name, "texto", params.arr, params.n, body_block, comp_tok->line, comp_tok->column);
+    ASTNode *fn = make_function_node_simple(name, "texto", params.arr, params.n, body_block, comp_tok->line, comp_tok->column, p->source_path);
     free(name);
     return fn;
 }
@@ -1068,7 +1053,7 @@ static ASTNode *parse_estructura_view_v2(Parser *p) {
     ASTNode **stmts = calloc(1, sizeof(ASTNode *));
     stmts[0] = make_return_stmt(body_expr, view_tok->line, view_tok->column);
     ASTNode *body_block = make_block_node(stmts, 1, view_tok->line, view_tok->column);
-    ASTNode *fn = make_function_node_simple(name, "texto", params.arr, params.n, body_block, view_tok->line, view_tok->column);
+    ASTNode *fn = make_function_node_simple(name, "texto", params.arr, params.n, body_block, view_tok->line, view_tok->column, p->source_path);
     free(name);
     return fn;
 }
@@ -1183,10 +1168,10 @@ static int parse_estructura_app_v2(Parser *p, NodeVec *funcs, NodeVec *globals, 
 
     char *handler_name = make_named_string("estructura_app_", app_name, "");
     ASTNode **handler_params = calloc(1, sizeof(ASTNode *));
-    handler_params[0] = make_var_decl_simple("texto", "solicitud", NULL, app_tok->line, app_tok->column);
+    handler_params[0] = make_var_decl_simple("texto", "solicitud", NULL, app_tok->line, app_tok->column, p->source_path);
     ASTNode **handler_stmts = calloc(route_count + 2, sizeof(ASTNode *));
     size_t handler_n = 0;
-    handler_stmts[handler_n++] = make_var_decl_simple("texto", "navegacion", nav_markup, app_tok->line, app_tok->column);
+    handler_stmts[handler_n++] = make_var_decl_simple("texto", "navegacion", nav_markup, app_tok->line, app_tok->column, p->source_path);
     for (size_t i = 0; i < route_count; i++) {
         ASTNode *cond = make_route_match_expr(route_exprs[i], app_tok->line, app_tok->column);
         ASTNode **view_args = calloc(1, sizeof(ASTNode *));
@@ -1224,7 +1209,7 @@ static int parse_estructura_app_v2(Parser *p, NodeVec *funcs, NodeVec *globals, 
         handler_stmts[handler_n++] = make_return_stmt(make_call_named("estructura_no_encontrado", not_found_args, 2, app_tok->line, app_tok->column), app_tok->line, app_tok->column);
     }
     ASTNode *handler_body = make_block_node(handler_stmts, handler_n, app_tok->line, app_tok->column);
-    node_vec_push(funcs, make_function_node_simple(handler_name, "texto", handler_params, 1, handler_body, app_tok->line, app_tok->column));
+    node_vec_push(funcs, make_function_node_simple(handler_name, "texto", handler_params, 1, handler_body, app_tok->line, app_tok->column, p->source_path));
 
     node_vec_push(main_stmts, make_print_stmt(make_literal_str("Estructa"), app_tok->line, app_tok->column));
     node_vec_push(main_stmts, make_print_stmt(make_literal_str("app declarativa activa en http://127.0.0.1:18220"), app_tok->line, app_tok->column));
@@ -1241,7 +1226,7 @@ static int parse_estructura_app_v2(Parser *p, NodeVec *funcs, NodeVec *globals, 
     return 1;
 }
 
-static ASTNode *make_estructura_window_function(const char *fn_name, EstructaWindowDef *wd) {
+static ASTNode *make_estructura_window_function(const char *fn_name, EstructaWindowDef *wd, const char *source_path) {
     ASTNode **args = calloc(4, sizeof(ASTNode *));
     args[0] = wd->route_expr;
     args[1] = wd->title_expr;
@@ -1255,7 +1240,7 @@ static ASTNode *make_estructura_window_function(const char *fn_name, EstructaWin
     ASTNode **stmts = calloc(1, sizeof(ASTNode *));
     stmts[0] = make_return_stmt(page_call, wd->line, wd->col);
     ASTNode *body = make_block_node(stmts, 1, wd->line, wd->col);
-    return make_function_node_simple(fn_name, "texto", NULL, 0, body, wd->line, wd->col);
+    return make_function_node_simple(fn_name, "texto", NULL, 0, body, wd->line, wd->col, source_path);
 }
 
 static char *make_named_string(const char *a, const char *b, const char *c) {
@@ -1412,7 +1397,7 @@ static int parse_estructura_application(Parser *p, NodeVec *funcs, NodeVec *glob
         node_vec_push(&nav_exprs, nav_link);
         char *screen_fn = make_named_string("estructura_ventana_", windows.arr[i].name, "");
         node_vec_push(&view_calls, make_window_call_expr(screen_fn, windows.arr[i].line, windows.arr[i].col));
-        ASTNode *fn = make_estructura_window_function(screen_fn, &windows.arr[i]);
+        ASTNode *fn = make_estructura_window_function(screen_fn, &windows.arr[i], p->source_path);
         node_vec_push(funcs, fn);
         free(screen_fn);
     }
@@ -1426,7 +1411,7 @@ static int parse_estructura_application(Parser *p, NodeVec *funcs, NodeVec *glob
     ASTNode **handler_stmts = calloc(1, sizeof(ASTNode *));
     handler_stmts[0] = make_return_stmt(make_call_named("estructura_app_rutas", shell_args, 3, app_tok->line, app_tok->column), app_tok->line, app_tok->column);
     ASTNode *handler_body = make_block_node(handler_stmts, 1, app_tok->line, app_tok->column);
-    node_vec_push(funcs, make_function_node_simple(handler_name, "texto", NULL, 0, handler_body, app_tok->line, app_tok->column));
+    node_vec_push(funcs, make_function_node_simple(handler_name, "texto", NULL, 0, handler_body, app_tok->line, app_tok->column, p->source_path));
 
     node_vec_push(main_stmts, make_print_stmt(make_literal_str("Estructa"), app_tok->line, app_tok->column));
     node_vec_push(main_stmts, make_print_stmt(make_literal_str("app DSL activa en http://127.0.0.1:18220"), app_tok->line, app_tok->column));
@@ -1568,24 +1553,30 @@ static ASTNode *make_if_stmt(ASTNode *cond, ASTNode *body, ASTNode *else_body, i
     return (ASTNode *)in;
 }
 
-static ASTNode *make_var_decl_simple(const char *type_name, const char *name, ASTNode *value, int line, int col) {
+static ASTNode *make_var_decl_node(const char *type_name, const char *name, ASTNode *value, int line, int col, const char *source_path) {
     VarDeclNode *vd = calloc(1, sizeof(VarDeclNode));
     if (!vd) return NULL;
     vd->base.type = NODE_VAR_DECL;
     vd->base.line = line;
     vd->base.col = col;
+    vd->diag_source_unit = source_path ? strdup(source_path) : NULL;
     vd->type_name = strdup_safe(type_name);
     vd->name = strdup_safe(name);
     vd->value = value;
     return (ASTNode *)vd;
 }
 
-static ASTNode *make_function_node_simple(const char *name, const char *return_type, ASTNode **params, size_t n_params, ASTNode *body, int line, int col) {
+static ASTNode *make_var_decl_simple(const char *type_name, const char *name, ASTNode *value, int line, int col, const char *source_path) {
+    return make_var_decl_node(type_name, name, value, line, col, source_path);
+}
+
+static ASTNode *make_function_node_simple(const char *name, const char *return_type, ASTNode **params, size_t n_params, ASTNode *body, int line, int col, const char *source_path) {
     FunctionNode *fn = calloc(1, sizeof(FunctionNode));
     if (!fn) return NULL;
     fn->base.type = NODE_FUNCTION;
     fn->base.line = line;
     fn->base.col = col;
+    fn->diag_source_unit = source_path ? strdup(source_path) : NULL;
     fn->name = strdup_safe(name);
     fn->return_type = strdup_safe(return_type);
     fn->params = params;
@@ -1751,8 +1742,10 @@ static ASTNode *dup_with_lambda_subst(const ASTNode *node, char **params, ASTNod
                 n->value = ln->value;
             return (ASTNode*)n;
         }
-        case NODE_IDENTIFIER:
-            return make_identifier(((const IdentifierNode*)node)->name, node->line, node->col);
+        case NODE_IDENTIFIER: {
+            const IdentifierNode *id = (const IdentifierNode *)node;
+            return make_identifier(id->name, id->line, id->col);
+        }
         case NODE_BINARY_OP: {
             const BinaryOpNode *bn = (const BinaryOpNode*)node;
             BinaryOpNode *n = calloc(1, sizeof(BinaryOpNode));
@@ -2225,7 +2218,21 @@ static ASTNode *parse_primary(Parser *p) {
             const Token *pk = peek(p, 0);
             if (!pk) break;
             if (pk->type == TOK_OPERATOR && pk->value.str && strcmp(pk->value.str, "}") == 0) break;
-            ASTNode *k = parse_expression(p);
+            
+            ASTNode *k = NULL;
+            if (pk->type == TOK_IDENTIFIER) {
+                advance(p);
+                k = make_literal_str(pk->value.str ? pk->value.str : "");
+            } else if (pk->type == TOK_STRING) {
+                advance(p);
+                k = make_literal_str(pk->value.str ? pk->value.str : "");
+            } else if (pk->type == TOK_KEYWORD && pk->value.str && keyword_ok_as_user_identifier(pk->value.str)) {
+                advance(p);
+                k = make_literal_str(pk->value.str);
+            } else {
+                k = parse_expression(p);
+            }
+
             if (!k) break;
             expect(p, TOK_OPERATOR, ":", "Se esperaba ':'");
             ASTNode *v = parse_expression(p);
@@ -2562,7 +2569,7 @@ static ASTNode *parse_comparison(Parser *p) {
             op_consumed = 1;
             op_owned = strdup(op);
         }
-    } else if (t->type == TOK_IDENTIFIER && t->value.str) {
+    } else if ((t->type == TOK_IDENTIFIER || t->type == TOK_KEYWORD) && t->value.str) {
         if (strcmp(t->value.str, "esta") == 0 && peek(p, 1) && peek(p, 1)->value.str &&
             (strcmp(peek(p, 1)->value.str, "vacia") == 0 || strcmp(peek(p, 1)->value.str, "vacio") == 0)) {
             advance(p); advance(p);
@@ -3088,6 +3095,7 @@ static ASTNode *parse_statement(Parser *p) {
             n->base.type = NODE_VAR_DECL;
             n->base.line = nt ? nt->line : (ty ? ty->line : 0);
             n->base.col = nt ? nt->column : (ty ? ty->column : 0);
+            n->diag_source_unit = p->source_path ? strdup(p->source_path) : NULL;
             n->type_name = tyn;
             n->name = nm;
             n->value = val;
@@ -3122,11 +3130,20 @@ static ASTNode *parse_statement(Parser *p) {
             n->base.type = NODE_VAR_DECL;
             n->base.line = nt ? nt->line : t->line;
             n->base.col = nt ? nt->column : t->column;
+            n->diag_source_unit = p->source_path ? strdup(p->source_path) : NULL;
             n->type_name = strdup("objeto");
             n->name = nm;
             n->value = val;
             n->is_const = 0;
             return (ASTNode *)n;
+        }
+        if (strcmp(t->value.str, "registro") == 0) {
+            advance(p);
+            return parse_struct_body(p, 0, 0);
+        }
+        if (strcmp(t->value.str, "clase") == 0) {
+            advance(p);
+            return parse_struct_body(p, 1, 0);
         }
         if (strcmp(t->value.str, "entero") == 0 || strcmp(t->value.str, "texto") == 0 ||
             strcmp(t->value.str, "flotante") == 0 || strcmp(t->value.str, "bool") == 0 ||
@@ -3136,7 +3153,7 @@ static ASTNode *parse_statement(Parser *p) {
             strcmp(t->value.str, "vec3") == 0 || strcmp(t->value.str, "vec4") == 0 || strcmp(t->value.str, "mat4") == 0 || strcmp(t->value.str, "mat3") == 0 ||
             strcmp(t->value.str, "bytes") == 0 || strcmp(t->value.str, "socket") == 0 || strcmp(t->value.str, "tls") == 0 ||
             strcmp(t->value.str, "http_solicitud") == 0 || strcmp(t->value.str, "http_respuesta") == 0 || strcmp(t->value.str, "http_servidor") == 0 ||
-            strcmp(t->value.str, "mapa") == 0) {
+            strcmp(t->value.str, "elemento") == 0 || strcmp(t->value.str, "objeto") == 0) {
             char *ty = strdup(t->value.str);
             advance(p);
 
@@ -3164,10 +3181,64 @@ static ASTNode *parse_statement(Parser *p) {
             n->base.type = NODE_VAR_DECL;
             n->base.line = nt ? nt->line : t->line;
             n->base.col = nt ? nt->column : t->column;
+            n->diag_source_unit = p->source_path ? strdup(p->source_path) : NULL;
             n->type_name = ty;
             n->name = nm;
             n->value = val;
             n->is_const = 0;
+            return (ASTNode*)n;
+        }
+        if (strcmp(t->value.str, "mapa") == 0) {
+            char *ty = strdup(t->value.str);
+            advance(p);
+
+            /* Suffix opcional '?' para tipos opcionales */
+            const Token *q = peek(p, 0);
+            if (q && q->type == TOK_OPERATOR && q->value.str && strcmp(q->value.str, "?") == 0) {
+                char *new_type = malloc(strlen(ty) + 2);
+                sprintf(new_type, "%s?", ty);
+                free(ty);
+                ty = new_type;
+                advance(p);
+            }
+
+            /* Caso 1: mapa<T> nombre */
+            char *mapa_el = parse_optional_lista_element_type(p);
+            
+            const Token *nt = peek(p, 0);
+            if (!validate_user_defined_name_tok(p, nt)) {
+                free(ty);
+                free(mapa_el);
+                return NULL;
+            }
+            advance(p);
+            char *nm = nt && nt->value.str ? strdup(nt->value.str) : NULL;
+
+            /* Caso 2: mapa nombre<T> */
+            if (!mapa_el) {
+                mapa_el = parse_optional_lista_element_type(p);
+            }
+
+            if (p->last_error) {
+                free(ty);
+                free(nm);
+                free(mapa_el);
+                return NULL;
+            }
+            
+            ASTNode *val = NULL;
+            if (match(p, TOK_OPERATOR, "="))
+                val = parse_expression(p);
+            VarDeclNode *n = calloc(1, sizeof(VarDeclNode));
+            n->base.type = NODE_VAR_DECL;
+            n->base.line = nt ? nt->line : t->line;
+            n->base.col = nt ? nt->column : t->column;
+            n->diag_source_unit = p->source_path ? strdup(p->source_path) : NULL;
+            n->type_name = ty;
+            n->name = nm;
+            n->value = val;
+            n->is_const = 0;
+            n->list_element_type = mapa_el;
             return (ASTNode*)n;
         }
         if (strcmp(t->value.str, "lista") == 0) {
@@ -3184,11 +3255,9 @@ static ASTNode *parse_statement(Parser *p) {
                 advance(p);
             }
 
+            /* Caso 1: lista<T> nombre */
             char *lista_el = parse_optional_lista_element_type(p);
-            if (p->last_error) {
-                free(ty);
-                return NULL;
-            }
+            
             const Token *nt = peek(p, 0);
             if (!validate_user_defined_name_tok(p, nt)) {
                 free(ty);
@@ -3197,6 +3266,19 @@ static ASTNode *parse_statement(Parser *p) {
             }
             advance(p);
             char *nm = nt && nt->value.str ? strdup(nt->value.str) : NULL;
+
+            /* Caso 2: lista nombre<T> */
+            if (!lista_el) {
+                lista_el = parse_optional_lista_element_type(p);
+            }
+
+            if (p->last_error) {
+                free(ty);
+                free(nm);
+                free(lista_el);
+                return NULL;
+            }
+            
             ASTNode *val = NULL;
             if (match(p, TOK_OPERATOR, "="))
                 val = parse_expression(p);
@@ -3204,6 +3286,7 @@ static ASTNode *parse_statement(Parser *p) {
             n->base.type = NODE_VAR_DECL;
             n->base.line = nt ? nt->line : t->line;
             n->base.col = nt ? nt->column : t->column;
+            n->diag_source_unit = p->source_path ? strdup(p->source_path) : NULL;
             n->type_name = ty;
             n->name = nm;
             n->value = val;
@@ -3245,6 +3328,7 @@ static ASTNode *parse_statement(Parser *p) {
             n->base.type = NODE_VAR_DECL;
             n->base.line = nt ? nt->line : t->line;
             n->base.col = nt ? nt->column : t->column;
+            n->diag_source_unit = p->source_path ? strdup(p->source_path) : NULL;
             n->type_name = ty;
             n->name = nm;
             n->value = val;
@@ -3468,94 +3552,165 @@ static ASTNode *parse_statement(Parser *p) {
             n->base.col = m_tok->column;
             return (ASTNode*)n;
         }
-        if (strcmp(t->value.str, "para_cada") == 0) {
-            const Token *fe_tok = t;
+        if (strcmp(t->value.str, "para") == 0) {
+            const Token *p_tok = t;
             advance(p);
-            const Token *ity = peek(p, 0);
-            if (!ity || ity->type != TOK_KEYWORD || !ity->value.str) {
-                set_error_here(p, ity ? ity : peek(p, 0),
-                               "para_cada requiere un tipo de elemento (entero, flotante, texto, bool) antes del nombre de variable.");
-                return NULL;
-            }
-            static const char *ok_it[] = {"entero", "flotante", "texto", "bool", NULL};
-            int it_ok = 0;
-            for (int i = 0; ok_it[i]; i++)
-                if (strcmp(ity->value.str, ok_it[i]) == 0) it_ok = 1;
-            if (!it_ok) {
-                set_error_here(p, ity, "para_cada: el tipo de elemento debe ser entero, flotante, texto o bool.");
-                return NULL;
-            }
-            char *iter_ty = strdup(ity->value.str);
-            if (!iter_ty) return NULL;
-            advance(p);
-            const Token *id_tok = peek(p, 0);
-            if (!validate_user_defined_name_tok(p, id_tok)) {
-                free(iter_ty);
-                return NULL;
-            }
-            char *iter_nm = id_tok && id_tok->value.str ? strdup(id_tok->value.str) : NULL;
-            advance(p);
-            if (!expect(p, TOK_KEYWORD, "sobre", "Se esperaba 'sobre' despues del nombre de variable en para_cada")) {
-                free(iter_ty);
-                free(iter_nm);
-                return NULL;
-            }
-            ASTNode *coll = parse_expression(p);
-            if (!coll) {
-                free(iter_ty);
-                free(iter_nm);
-                return NULL;
-            }
-            if (!expect(p, TOK_KEYWORD, "hacer", "Se esperaba 'hacer' despues de la expresion de lista en para_cada")) {
-                ast_free(coll);
-                free(iter_ty);
-                free(iter_nm);
-                return NULL;
-            }
-            const char *fe_ends[] = {"fin_para_cada"};
-            ASTNode *fe_body = parse_block(p, fe_ends, 1);
-            if (p->last_error) {
-                ast_free(coll);
-                free(iter_ty);
-                free(iter_nm);
-                return NULL;
-            }
-            if (!match(p, TOK_KEYWORD, "fin_para_cada")) {
-                const Token *next_t = peek(p, 0);
-                if (next_t && next_t->type == TOK_KEYWORD && next_t->value.str) {
-                    if (p->source_path && p->source_path[0])
-                        set_error_at(p, fe_tok->line, fe_tok->column,
-                                     "Archivo %s, linea %d, columna %d: bloque 'para_cada' sin cierre 'fin_para_cada' (se encontro '%s').",
-                                     p->source_path, fe_tok->line, fe_tok->column, next_t->value.str);
-                    else
-                        set_error_at(p, fe_tok->line, fe_tok->column,
-                                     "linea %d, columna %d: bloque 'para_cada' sin cierre 'fin_para_cada' (se encontro '%s').",
-                                     fe_tok->line, fe_tok->column, next_t->value.str);
-                } else {
-                    if (p->source_path && p->source_path[0])
-                        set_error_at(p, fe_tok->line, fe_tok->column,
-                                     "Archivo %s, linea %d, columna %d: bloque 'para_cada' sin cierre 'fin_para_cada'.",
-                                     p->source_path, fe_tok->line, fe_tok->column);
-                    else
-                        set_error_at(p, fe_tok->line, fe_tok->column,
-                                     "linea %d, columna %d: bloque 'para_cada' sin cierre 'fin_para_cada'.",
-                                     fe_tok->line, fe_tok->column);
+
+            // Caso 1: para cada [tipo] elemento en lista hacer ... fin_para
+            if (match(p, TOK_KEYWORD, "cada")) {
+                const Token *ity = peek(p, 0);
+                char *iter_ty = NULL;
+                
+                // El tipo es opcional, si no está usamos "elemento"
+                static const char *ok_it[] = {"entero", "flotante", "texto", "bool", NULL};
+                int it_ok = 0;
+                if (ity && ity->type == TOK_KEYWORD && ity->value.str) {
+                    // Si el siguiente token es 'en', entonces 'ity' es el nombre de la variable, no el tipo.
+                    const Token *next = peek(p, 1);
+                    int is_followed_by_en = (next && next->type == TOK_KEYWORD && next->value.str && strcmp(next->value.str, "en") == 0);
+                    
+                    if (!is_followed_by_en) {
+                        for (int i = 0; ok_it[i]; i++) {
+                            if (strcmp(ity->value.str, ok_it[i]) == 0) {
+                                it_ok = 1;
+                                break;
+                            }
+                        }
+                    }
                 }
-                ast_free(coll);
-                ast_free(fe_body);
-                free(iter_ty);
-                free(iter_nm);
-                return NULL;
+
+                if (it_ok) {
+                    iter_ty = strdup(ity->value.str);
+                    advance(p);
+                } else {
+                    iter_ty = strdup("elemento");
+                }
+
+                const Token *id_tok = peek(p, 0);
+                // Si el nombre es 'elemento' o 'en' y no fue consumido como tipo, o si es un identificador válido
+                if (id_tok && id_tok->value.str && (strcmp(id_tok->value.str, "elemento") == 0)) {
+                    // Permitir 'elemento' como nombre de variable aquí
+                    advance(p);
+                } else {
+                    if (!validate_user_defined_name_tok(p, id_tok)) {
+                        free(iter_ty);
+                        return NULL;
+                    }
+                    advance(p);
+                }
+                char *iter_nm = id_tok && id_tok->value.str ? strdup(id_tok->value.str) : NULL;
+
+                if (!expect(p, TOK_KEYWORD, "en", "Se esperaba 'en' despues del nombre de variable en para cada")) {
+                    free(iter_ty);
+                    free(iter_nm);
+                    return NULL;
+                }
+
+                ASTNode *coll = parse_expression(p);
+                if (!coll) {
+                    free(iter_ty);
+                    free(iter_nm);
+                    return NULL;
+                }
+
+                if (!expect(p, TOK_KEYWORD, "hacer", "Se esperaba 'hacer' despues de la expresion de lista en para cada")) {
+                    ast_free(coll);
+                    free(iter_ty);
+                    free(iter_nm);
+                    return NULL;
+                }
+
+                const char *fe_ends[] = {"fin_para", "fin_para_cada"};
+                ASTNode *fe_body = parse_block(p, fe_ends, 2);
+                if (p->last_error) {
+                    ast_free(coll);
+                    free(iter_ty);
+                    free(iter_nm);
+                    return NULL;
+                }
+
+                if (!match(p, TOK_KEYWORD, "fin_para") && !match(p, TOK_KEYWORD, "fin_para_cada")) {
+                    set_error_at(p, p_tok->line, p_tok->column, "bloque 'para cada' sin cierre 'fin_para'.");
+                    ast_free(coll);
+                    ast_free(fe_body);
+                    free(iter_ty);
+                    free(iter_nm);
+                    return NULL;
+                }
+
+                ForEachNode *n = calloc(1, sizeof(ForEachNode));
+                n->base.type = NODE_FOREACH;
+                n->base.line = p_tok->line;
+                n->base.col = p_tok->column;
+                n->iter_type = iter_ty;
+                n->iter_name = iter_nm;
+                n->collection = coll;
+                n->body = fe_body;
+                return (ASTNode *)n;
+            } else {
+                // Caso 2: para entero i = 0 mientras i < 100 con i++ hacer ... fin_para
+                ASTNode *init = parse_statement(p);
+                if (!init) return NULL;
+
+                if (!expect(p, TOK_KEYWORD, "mientras", "Se esperaba 'mientras' en el bucle para")) {
+                    ast_free(init);
+                    return NULL;
+                }
+
+                ASTNode *cond = parse_expression(p);
+                if (!cond) {
+                    ast_free(init);
+                    return NULL;
+                }
+
+                if (!expect(p, TOK_KEYWORD, "con", "Se esperaba 'con' en el bucle para")) {
+                    ast_free(init);
+                    ast_free(cond);
+                    return NULL;
+                }
+
+                ASTNode *step = parse_expression(p);
+                if (!step) {
+                    ast_free(init);
+                    ast_free(cond);
+                    return NULL;
+                }
+
+                if (!expect(p, TOK_KEYWORD, "hacer", "Se esperaba 'hacer' en el bucle para")) {
+                    ast_free(init);
+                    ast_free(cond);
+                    ast_free(step);
+                    return NULL;
+                }
+
+                const char *for_ends[] = {"fin_para"};
+                ASTNode *body = parse_block(p, for_ends, 1);
+                if (p->last_error) {
+                    ast_free(init);
+                    ast_free(cond);
+                    ast_free(step);
+                    return NULL;
+                }
+
+                if (!match(p, TOK_KEYWORD, "fin_para")) {
+                    set_error_at(p, p_tok->line, p_tok->column, "bloque 'para' sin cierre 'fin_para'.");
+                    ast_free(init);
+                    ast_free(cond);
+                    ast_free(step);
+                    ast_free(body);
+                    return NULL;
+                }
+
+                ForNode *n = calloc(1, sizeof(ForNode));
+                n->base.type = NODE_FOR;
+                n->base.line = p_tok->line;
+                n->base.col = p_tok->column;
+                n->init = init;
+                n->condition = cond;
+                n->step = step;
+                n->body = body;
+                return (ASTNode *)n;
             }
-            ForEachNode *n = calloc(1, sizeof(ForEachNode));
-            n->base.type = NODE_FOREACH;
-            n->base.line = fe_tok->line;
-            n->base.col = fe_tok->column;
-            n->iter_type = iter_ty;
-            n->iter_name = iter_nm;
-            n->collection = coll;
-            n->body = fe_body;
-            return (ASTNode *)n;
         }
         if (strcmp(t->value.str, "hacer") == 0) {
             const Token *h_tok = t;
@@ -4303,6 +4458,7 @@ static ASTNode *parse_statement(Parser *p) {
                 n->base.type = NODE_VAR_DECL;
                 n->base.line = name_tok ? name_tok->line : t->line;
                 n->base.col = name_tok ? name_tok->column : t->column;
+                n->diag_source_unit = p->source_path ? strdup(p->source_path) : NULL;
                 n->type_name = ty;
                 n->name = nm;
                 n->value = val;
@@ -4353,6 +4509,15 @@ static ASTNode *parse_statement(Parser *p) {
         if (!node) return NULL;
         if (match(p, TOK_OPERATOR, "=")) {
             ASTNode *expr = parse_expression(p);
+            if (node->type == NODE_INDEX_ACCESS) {
+                IndexAssignmentNode *a = calloc(1, sizeof(IndexAssignmentNode));
+                a->base.type = NODE_INDEX_ASSIGNMENT;
+                a->target = ((IndexAccessNode*)node)->target;
+                a->index = ((IndexAccessNode*)node)->index;
+                a->expression = expr;
+                free(node); // Liberar el nodo IndexAccess intermedio
+                return (ASTNode*)a;
+            }
             AssignmentNode *a = calloc(1, sizeof(AssignmentNode));
             a->base.type = NODE_ASSIGNMENT;
             a->target = node;
@@ -4644,6 +4809,7 @@ static ASTNode *parse_function(Parser *p, int is_exported, int is_async) {
     fn->base.type = NODE_FUNCTION;
     fn->base.line = func_tok ? func_tok->line : 0;
     fn->base.col = func_tok ? func_tok->column : 0;
+    fn->diag_source_unit = p->source_path ? strdup(p->source_path) : NULL;
     fn->name = name;
     fn->return_type = (char*)ret_type;
     fn->return_task_elem = return_task_elem;
@@ -4753,69 +4919,153 @@ static ASTNode *parse_struct_body(Parser *p, int is_clase, int is_exported) {
         
         const Token *ty_tok = peek(p, 0);
         char *type_name = NULL;
-        if (ty_tok && ty_tok->type == TOK_KEYWORD && ty_tok->value.str && 
-            (strcmp(ty_tok->value.str, "lista") == 0 || strcmp(ty_tok->value.str, "mapa") == 0)) {
-            advance(p);
-            type_name = strdup(ty_tok->value.str);
-            /* Suffix opcional '?' */
-            const Token *q = peek(p, 0);
-            if (q && q->type == TOK_OPERATOR && q->value.str && strcmp(q->value.str, "?") == 0) {
-                char *new_type = malloc(strlen(type_name) + 2);
-                sprintf(new_type, "%s?", type_name);
-                free(type_name);
-                type_name = new_type;
+        char *field_name = NULL;
+
+        // Soporte para: "nombre: tipo" o "tipo nombre"
+        const Token *t1 = peek(p, 0);
+        const Token *t2 = peek(p, 1);
+        if (t1 && (t1->type == TOK_IDENTIFIER || t1->type == TOK_KEYWORD) && 
+            t2 && t2->type == TOK_OPERATOR && t2->value.str && strcmp(t2->value.str, ":") == 0) {
+            // Sintaxis "nombre: tipo"
+            field_name = strdup_safe(t1->value.str);
+            advance(p); // consume nombre
+            advance(p); // consume :
+            
+            const Token *ty = peek(p, 0);
+            if (!ty) { free(field_name); goto parse_struct_body_fail; }
+            if (ty->type == TOK_KEYWORD && ty->value.str && 
+                (strcmp(ty->value.str, "lista") == 0 || strcmp(ty->value.str, "mapa") == 0)) {
                 advance(p);
-            }
-            char *elem_type = parse_optional_lista_element_type(p);
-            if (elem_type) {
-                char *new_type = malloc(strlen(type_name) + strlen(elem_type) + 3);
-                sprintf(new_type, "%s<%s>", type_name, elem_type);
-                free(type_name);
-                type_name = new_type;
-                free(elem_type);
-            }
-        } else if (ty_tok && ty_tok->type == TOK_KEYWORD && ty_tok->value.str && strcmp(ty_tok->value.str, "tarea") == 0) {
-            advance(p);
-            type_name = strdup("tarea");
-            /* Suffix opcional '?' */
-            const Token *q = peek(p, 0);
-            if (q && q->type == TOK_OPERATOR && q->value.str && strcmp(q->value.str, "?") == 0) {
-                char *new_type = malloc(strlen(type_name) + 2);
-                sprintf(new_type, "%s?", type_name);
-                free(type_name);
-                type_name = new_type;
+                type_name = strdup(ty->value.str);
+                /* Suffix opcional '?' */
+                const Token *q = peek(p, 0);
+                if (q && q->type == TOK_OPERATOR && q->value.str && strcmp(q->value.str, "?") == 0) {
+                    char *new_type = malloc(strlen(type_name) + 2);
+                    sprintf(new_type, "%s?", type_name);
+                    free(type_name);
+                    type_name = new_type;
+                    advance(p);
+                }
+                char *elem_type = parse_optional_lista_element_type(p);
+                if (elem_type) {
+                    char *new_type = malloc(strlen(type_name) + strlen(elem_type) + 3);
+                    sprintf(new_type, "%s<%s>", type_name, elem_type);
+                    free(type_name);
+                    type_name = new_type;
+                    free(elem_type);
+                }
+            } else {
+                type_name = ty->value.str ? strdup(ty->value.str) : NULL;
                 advance(p);
-            }
-            char *tarea_el = NULL;
-            if (parse_optional_tarea_inner_type_after_tarea_keyword(p, &tarea_el) && tarea_el) {
-                char *new_type = malloc(strlen(type_name) + strlen(tarea_el) + 3);
-                sprintf(new_type, "%s<%s>", type_name, tarea_el);
-                free(type_name);
-                type_name = new_type;
-                free(tarea_el);
+
+                /* Soporte para Tipo[] como alias de lista<Tipo> */
+                const Token *sq = peek(p, 0);
+                if (sq && sq->type == TOK_OPERATOR && sq->value.str && strcmp(sq->value.str, "[") == 0) {
+                    const Token *sq_end = peek(p, 1);
+                    if (sq_end && sq_end->type == TOK_OPERATOR && sq_end->value.str && strcmp(sq_end->value.str, "]") == 0) {
+                        char *new_type = malloc(strlen("lista") + strlen(type_name) + 3);
+                        sprintf(new_type, "lista<%s>", type_name);
+                        free(type_name);
+                        type_name = new_type;
+                        advance(p); // [
+                        advance(p); // ]
+                    }
+                }
+
+                /* Suffix opcional '?' */
+                const Token *q = peek(p, 0);
+                if (q && q->type == TOK_OPERATOR && q->value.str && strcmp(q->value.str, "?") == 0) {
+                    char *new_type = malloc((type_name ? strlen(type_name) : 0) + 2);
+                    sprintf(new_type, "%s?", type_name ? type_name : "");
+                    if (type_name) free(type_name);
+                    type_name = new_type;
+                    advance(p);
+                }
             }
         } else {
-            const Token *ty = peek(p, 0);
-            if (!ty) goto parse_struct_body_fail;
-            advance(p);
-            type_name = ty->value.str ? strdup(ty->value.str) : NULL;
-            /* Suffix opcional '?' */
-            const Token *q = peek(p, 0);
-            if (q && q->type == TOK_OPERATOR && q->value.str && strcmp(q->value.str, "?") == 0) {
-                char *new_type = malloc((type_name ? strlen(type_name) : 0) + 2);
-                sprintf(new_type, "%s?", type_name ? type_name : "");
-                if (type_name) free(type_name);
-                type_name = new_type;
+            // Sintaxis clasica: "tipo nombre"
+            if (ty_tok && ty_tok->type == TOK_KEYWORD && ty_tok->value.str && 
+                (strcmp(ty_tok->value.str, "lista") == 0 || strcmp(ty_tok->value.str, "mapa") == 0)) {
                 advance(p);
-            }
-        }
+                type_name = strdup(ty_tok->value.str);
+                /* Suffix opcional '?' */
+                const Token *q = peek(p, 0);
+                if (q && q->type == TOK_OPERATOR && q->value.str && strcmp(q->value.str, "?") == 0) {
+                    char *new_type = malloc(strlen(type_name) + 2);
+                    sprintf(new_type, "%s?", type_name);
+                    free(type_name);
+                    type_name = new_type;
+                    advance(p);
+                }
+                char *elem_type = parse_optional_lista_element_type(p);
+                if (elem_type) {
+                    char *new_type = malloc(strlen(type_name) + strlen(elem_type) + 3);
+                    sprintf(new_type, "%s<%s>", type_name, elem_type);
+                    free(type_name);
+                    type_name = new_type;
+                    free(elem_type);
+                }
+            } else if (ty_tok && ty_tok->type == TOK_KEYWORD && ty_tok->value.str && strcmp(ty_tok->value.str, "tarea") == 0) {
+                advance(p);
+                type_name = strdup("tarea");
+                /* Suffix opcional '?' */
+                const Token *q = peek(p, 0);
+                if (q && q->type == TOK_OPERATOR && q->value.str && strcmp(q->value.str, "?") == 0) {
+                    char *new_type = malloc(strlen(type_name) + 2);
+                    sprintf(new_type, "%s?", type_name);
+                    free(type_name);
+                    type_name = new_type;
+                    advance(p);
+                }
+                char *tarea_el = NULL;
+                if (parse_optional_tarea_inner_type_after_tarea_keyword(p, &tarea_el) && tarea_el) {
+                    char *new_type = malloc(strlen(type_name) + strlen(tarea_el) + 3);
+                    sprintf(new_type, "%s<%s>", type_name, tarea_el);
+                    free(type_name);
+                    type_name = new_type;
+                    free(tarea_el);
+                }
+            } else {
+                type_name = ty_tok->value.str ? strdup(ty_tok->value.str) : NULL;
 
-        const Token *fld = peek(p, 0);
-        if (!fld || !validate_user_defined_name_tok(p, fld)) {
-            free(type_name);
-            goto parse_struct_body_fail;
+                /* Soporte para Tipo[] como alias de lista<Tipo> en sintaxis clasica */
+                const Token *sq = peek(p, 1);
+                if (sq && sq->type == TOK_OPERATOR && sq->value.str && strcmp(sq->value.str, "[") == 0) {
+                    const Token *sq_end = peek(p, 2);
+                    if (sq_end && sq_end->type == TOK_OPERATOR && sq_end->value.str && strcmp(sq_end->value.str, "]") == 0) {
+                        char *new_type = malloc(strlen("lista") + strlen(type_name) + 3);
+                        sprintf(new_type, "lista<%s>", type_name);
+                        free(type_name);
+                        type_name = new_type;
+                        advance(p); // tipo
+                        advance(p); // [
+                        advance(p); // ]
+                    } else {
+                        advance(p);
+                    }
+                } else {
+                    advance(p);
+                }
+
+                /* Suffix opcional '?' */
+                const Token *q = peek(p, 0);
+                if (q && q->type == TOK_OPERATOR && q->value.str && strcmp(q->value.str, "?") == 0) {
+                    char *new_type = malloc((type_name ? strlen(type_name) : 0) + 2);
+                    sprintf(new_type, "%s?", type_name ? type_name : "");
+                    if (type_name) free(type_name);
+                    type_name = new_type;
+                    advance(p);
+                }
+            }
+
+            const Token *fld = peek(p, 0);
+            if (!fld || !validate_user_defined_name_tok(p, fld)) {
+                free(type_name);
+                goto parse_struct_body_fail;
+            }
+            advance(p);
+            field_name = fld->value.str ? strdup(fld->value.str) : NULL;
         }
-        advance(p);
         
         if (nf >= fcap) {
             fcap = fcap ? fcap * 2 : 4;
@@ -4824,7 +5074,7 @@ static ASTNode *parse_struct_body(Parser *p, int is_clase, int is_exported) {
             fv = realloc(fv, fcap * sizeof(int));
         }
         ft[nf] = type_name;
-        fn[nf] = fld->value.str ? strdup(fld->value.str) : NULL;
+        fn[nf] = field_name;
         fv[nf] = visibility;
         nf++;
     }
@@ -4837,6 +5087,7 @@ static ASTNode *parse_struct_body(Parser *p, int is_clase, int is_exported) {
     sn->base.type = NODE_STRUCT_DEF;
     sn->base.line = nt ? nt->line : 0;
     sn->base.col = nt ? nt->column : 0;
+    sn->diag_source_unit = p->source_path ? strdup(p->source_path) : NULL;
     sn->name = name;
     sn->extends_names = extends_names;
     sn->n_extends = n_extends;
@@ -4916,22 +5167,11 @@ static ActivarModuloNode *parse_activar_modulo_directive(Parser *p, int kw_line,
 
     if (p1 && p1->type == TOK_KEYWORD && p1->value.str
         && (strcmp(p1->value.str, "todo") == 0 || strcmp(p1->value.str, "todas") == 0)) {
-        advance(p);
-        if (!expect(p, TOK_KEYWORD, "de", "Tras `usar todo` o `usar todas` se esperaba la palabra clave `de`.")) {
-            free(an);
-            return NULL;
-        }
-        const Token *pt = advance(p);
-        if (!pt || pt->type != TOK_STRING || !pt->value.str) {
-            set_error_here(p, pt ? pt : p1, "`usar todo de` / `usar todas de` requiere una ruta entre comillas (texto).");
-            free(an);
-            return NULL;
-        }
-        an->import_kind = USAR_IMPORT_TODO;
-        an->module_path = make_literal_str(pt->value.str);
-        an->base.line = pt->line;
-        an->base.col = pt->column;
-        return an;
+        set_error_here(p, p1, 
+            "Por razones de seguridad y claridad, `usar todo` y `usar todas` han sido eliminados. "
+            "Debe usar la sintaxis explicita: `usar { nombre1, nombre2 } de \"ruta\"`.");
+        free(an);
+        return NULL;
     }
 
     if (p1 && p1->type == TOK_OPERATOR && p1->value.str && strcmp(p1->value.str, "{") == 0) {
@@ -5017,15 +5257,13 @@ static ActivarModuloNode *parse_activar_modulo_directive(Parser *p, int kw_line,
     const Token *pt = peek(p, 0);
     if (pt && pt->type == TOK_STRING && pt->value.str) {
         set_error_here(p, pt,
-            "Tras `usar` se espera `todas de` o `todo de` y luego la ruta entre comillas, "
-            "o ` { n1, n2 } de` y la ruta entre comillas.");
+            "Tras `usar` se espera `{ n1, n2 } de` y la ruta entre comillas.");
         free(an);
         return NULL;
     }
     pt = advance(p);
     set_error_here(p, pt ? pt : peek(p, 0),
-        "Tras `usar` se espera `todas de` o `todo de` y la ruta entre comillas, "
-        "o ` { n1, n2 } de` y la ruta.");
+        "Tras `usar` se espera `{ n1, n2 } de` y la ruta.");
     free(an);
     return NULL;
 }

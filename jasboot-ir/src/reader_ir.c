@@ -345,6 +345,9 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != OP_MEM_PROPAGAR_ACTIVACION &&
             inst.opcode != OP_MEM_REGISTRAR_PATRON &&
             inst.opcode != OP_MEM_OBTENER_RELACION &&
+            inst.opcode != OP_MEM_MAPA_LLAVES &&
+            inst.opcode != OP_MEM_MAPA_TAMANO &&
+            inst.opcode != OP_MEM_MAPA_CONTIENE &&
             inst.opcode != OP_MEM_IMPRIMIR_ID &&
             inst.opcode != OP_STR_A_ENTERO &&
             inst.opcode != OP_STR_A_FLOTANTE &&

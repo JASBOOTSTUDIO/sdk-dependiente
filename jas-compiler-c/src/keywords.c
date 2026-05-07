@@ -1,6 +1,7 @@
 /* Keywords y operadores - definiciones */
 
 #include "keywords.h"
+#include "sistema_llamadas.h"
 #include <string.h>
 
 /* 1.9 FORBIDDEN_ENGLISH */
@@ -17,7 +18,7 @@ const char *const KEYWORDS[] = {
     "mientras", "fin_mientras", "cuando", "fin_cuando",
     "si", "sino", "fin_si",
     "imprimir", "imprimir_sin_salto", "imprimir_texto", "ingresar_texto", "ingreso_inmediato", "limpiar_consola", "pausa", "retornar", "romper", "continuar",
-    "entero", "texto", "flotante", "caracter", "constante", "u32", "u64", "u8", "byte",
+    "entero", "texto", "flotante", "caracter", "constante", "u32", "u64", "u8", "byte", "elemento",
     "bytes", "socket", "tls", "http_solicitud", "http_respuesta", "http_servidor",
     "vec2", "vec3", "vec4", "mat4", "mat3",
     "activar_modulo", "biblioteca", "recordar", "responder", "aprender", "reforzar", "penalizar", "buscar", "buscar_peso", "asociar",
@@ -35,7 +36,7 @@ const char *const KEYWORDS[] = {
     "bit_shl", "bit_shr", "sistema_ejecutar",
     "fs_escribir_byte", "mapa_crear", "mapa_poner", "mapa_obtener", "lista_poner",
     "str_a_entero", "str_a_flotante", "entrada_flotante",
-    "registro", "fin_registro", "clase", "fin_clase", "extiende", "lista", "mapa", "bool", "hacer", "fin_hacer", "usar", "enviar", "todo", "todas", "privado", "padre",
+    "registro", "fin_registro", "clase", "fin_clase", "extiende", "lista", "mapa", "bool", "hacer", "fin_hacer", "usar", "enviar", "privado", "padre",
     "seleccionar", "caso", "defecto", "fin_seleccionar",
     "intentar", "atrapar", "final", "fin_intentar", "lanzar", "macro", "llamar",
     "fs_abrir", "fs_cerrar", "fs_escribir", "fs_leer_linea",
@@ -51,6 +52,7 @@ const char *const KEYWORDS[] = {
     "tcp_conectar", "tcp_escuchar", "tcp_aceptar", "tcp_enviar", "tcp_recibir", "tcp_cerrar",
     "tls_cliente", "tls_servidor", "tls_enviar", "tls_recibir", "tls_cerrar",
     "pausa_milisegundos", "esperar_milisegundos",
+    "para", "cada", "en", "fin_para",
     "para_cada", "fin_para_cada", "sobre",
     "mem_crear", "mem_cerrar", "mem_asociar", "tiene_asociacion", "imprimir_flotante",
     "comparar_gt_flt", "mem_poner_u32_ind", "mem_obtener_u32_ind", "mem_aprender_peso_reg",
@@ -76,6 +78,47 @@ int is_keyword(const char *str, size_t len) {
         if (klen == len && memcmp(KEYWORDS[i], str, len) == 0)
             return 1;
     }
+    return 0;
+}
+
+int is_reserved_identifier(const char *name) {
+    if (!name || !name[0])
+        return 0;
+    size_t len = strlen(name);
+    
+    // Algunos keywords se permiten como identificadores si son tipos o palabras de conexión
+    if (strcmp(name, "vec2") == 0 || strcmp(name, "vec3") == 0 ||
+        strcmp(name, "vec4") == 0 || strcmp(name, "mat4") == 0 || strcmp(name, "mat3") == 0 ||
+        strcmp(name, "entrada") == 0 || strcmp(name, "texto") == 0 ||
+        strcmp(name, "caracter") == 0 || strcmp(name, "bool") == 0 ||
+        strcmp(name, "lista") == 0 || strcmp(name, "mapa") == 0 ||
+        strcmp(name, "entero") == 0 || strcmp(name, "flotante") == 0 || strcmp(name, "elemento") == 0 ||
+        strcmp(name, "u32") == 0 || strcmp(name, "u64") == 0 ||
+        strcmp(name, "u8") == 0 || strcmp(name, "byte") == 0 ||
+        strcmp(name, "bytes") == 0 || strcmp(name, "padre") == 0 ||
+        strcmp(name, "a") == 0 || strcmp(name, "de") == 0 ||
+        strcmp(name, "con") == 0 || strcmp(name, "o") == 0 ||
+        strcmp(name, "y") == 0 || strcmp(name, "que") == 0 ||
+        strcmp(name, "como") == 0 ||
+        strcmp(name, "sobre") == 0 ||
+        strcmp(name, "en") == 0 || strcmp(name, "cada") == 0 ||
+        strcmp(name, "valor") == 0 || strcmp(name, "peso") == 0 ||
+        strcmp(name, "igual") == 0 || strcmp(name, "es") == 0 ||
+        strcmp(name, "entonces") == 0 || strcmp(name, "retorna") == 0 ||
+        strcmp(name, "mayor") == 0 || strcmp(name, "menor") == 0 ||
+        strcmp(name, "distinto") == 0 || strcmp(name, "hacer") == 0 ||
+        strcmp(name, "json") == 0 || strcmp(name, "objeto") == 0 ||
+        strcmp(name, "decimal") == 0 || strcmp(name, "registro") == 0 ||
+        strcmp(name, "clase") == 0 || strcmp(name, "privado") == 0 ||
+        strcmp(name, "caso") == 0 || strcmp(name, "defecto") == 0 ||
+        is_sistema_llamada(name, len)) {
+        return 0;
+    }
+
+    if (is_keyword(name, len))
+        return 1;
+    if (is_forbidden(name, len))
+        return 1;
     return 0;
 }
 

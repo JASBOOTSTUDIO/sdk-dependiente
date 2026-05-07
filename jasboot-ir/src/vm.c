@@ -565,6 +565,8 @@ static void vm_elegir_por_peso_best(VM* vm, uint32_t ctx, uint32_t list_id,
 }
 #endif
 
+static int vm_text_cache_put(VM* vm, uint32_t id, const char* text);
+
 static void vm_text_cache_free(VM* vm) {
     if (!vm || !vm->text_cache_buckets) return;
     for (size_t i = 0; i < vm->text_cache_size; i++) {
@@ -868,9 +870,11 @@ static const char* vm_text_cache_get(VM* vm, uint32_t id) {
 #ifdef JASBOOT_LANG_INTEGRATION
         /* Si no esta en cache, podria ser un texto de la JMN */
         if (vm->mem_neuronal) {
-            static char jmn_scratch[1024];
+            char jmn_scratch[1024];
             if (jmn_obtener_texto(vm->mem_neuronal, id, jmn_scratch, sizeof(jmn_scratch)) >= 0) {
-                return jmn_scratch;
+                /* Lo agregamos a la cache para que tenga su propia memoria persistente en esta sesion */
+                vm_text_cache_put(vm, id, jmn_scratch);
+                return vm_text_cache_get(vm, id);
             }
         }
 #endif
@@ -1397,6 +1401,80 @@ static void vm_escribir_flotante(uint64_t valor) {
     fflush(stdout);
 }
 
+#ifdef JASBOOT_LANG_INTEGRATION
+static void vm_imprimir_valor_recursivo(VM* vm, JMNValor val, int depth) {
+    if (depth > 10) {
+        vm_escribir_cadena("...");
+        return;
+    }
+
+    uint32_t id = val.u;
+    
+    // 1. Intentar texto (cache)
+    const char* v_txt = id ? vm_text_cache_get(vm, id) : NULL;
+    if (v_txt) {
+        vm_escribir_cadena("\"");
+        vm_escribir_cadena(v_txt);
+        vm_escribir_cadena("\"");
+        return;
+    }
+
+    JMNMemoria* m_col = vm->mem_colecciones;
+    JMNMemoria* m_neu = vm->mem_neuronal;
+
+    // 2. Intentar colecciones (listas/mapas) - Solo si el ID es grande (heurística para evitar booleanos/enteros pequeños)
+    if (id > 100000 && m_col && (jmn_lista_existe(m_col, id) || jmn_mapa_existe(m_col, id))) {
+        int es_mapa = jmn_mapa_existe(m_col, id);
+        vm_escribir_cadena(es_mapa ? "{" : "[");
+        if (es_mapa) {
+            uint32_t tam = jmn_mapa_tamano(m_col, id);
+            for (uint32_t j = 0; j < tam; j++) {
+                if (j > 0) vm_escribir_cadena(", ");
+                uint32_t kid = jmn_mapa_obtener_llave(m_col, id, j);
+                JMNValor sub_val = jmn_mapa_obtener_valor_por_indice(m_col, id, j);
+                
+                const char* k_txt = vm_text_cache_get(vm, kid);
+                if (k_txt) { vm_escribir_cadena("\""); vm_escribir_cadena(k_txt); vm_escribir_cadena("\""); }
+                else { char b[32]; snprintf(b, sizeof(b), "%u", kid); vm_escribir_cadena(b); }
+                
+                vm_escribir_cadena(": ");
+                vm_imprimir_valor_recursivo(vm, sub_val, depth + 1);
+            }
+        } else {
+            uint32_t tam = jmn_lista_tamano(m_col, id);
+            for (uint32_t i = 0; i < tam; i++) {
+                if (i > 0) vm_escribir_cadena(", ");
+                JMNValor sub_v = jmn_lista_obtener(m_col, id, i);
+                vm_imprimir_valor_recursivo(vm, sub_v, depth + 1);
+                if (i >= 50) { vm_escribir_cadena(", ..."); break; }
+            }
+        }
+        vm_escribir_cadena(es_mapa ? "}" : "]");
+        return;
+    }
+
+    // 3. Intentar texto en JMN neuronal
+    if (m_neu && id != 0) {
+        char buf_txt[512];
+        if (jmn_obtener_texto(m_neu, id, buf_txt, sizeof(buf_txt)) >= 0 && buf_txt[0]) {
+            vm_text_cache_put(vm, id, buf_txt);
+            vm_escribir_cadena("\"");
+            vm_escribir_cadena(buf_txt);
+            vm_escribir_cadena("\"");
+            return;
+        }
+    }
+
+    // 4. Heurística de flotante vs entero
+    uint32_t exp = (id >> 23) & 0xFF;
+    if (id > 1000000 && exp > 0x30 && exp < 0xA0) {
+        vm_escribir_flotante((uint64_t)id);
+    } else {
+        vm_escribir_entero((uint64_t)id);
+    }
+}
+#endif
+
 /* Copia src a dst (hasta dstsz-1) sin espacio inicial ni final. */
 static void vm_str_trim_copia(const char *src, char *dst, size_t dstsz) {
     size_t n;
@@ -1510,6 +1588,56 @@ static void vm_free_cached_tls_server_ctx(VM* vm);
 static uint32_t vm_call_depth(VM* vm) {
     if (!vm) return 0;
     return (uint32_t)vm->stack_ptr;
+}
+
+static int vm_ensure_stack_space(VM* vm, uint32_t bytes_to_alloc, const char* context) {
+    const size_t VM_MEMORY_HARD_LIMIT = 256u * 1024u * 1024u; /* 256 MB */
+    if (!vm) return 0;
+    if (bytes_to_alloc == 0) return 1;
+
+    uint64_t required64 = (uint64_t)vm->sp + (uint64_t)bytes_to_alloc;
+    if (required64 <= (uint64_t)vm->memory_size) return 1;
+    if (required64 > (uint64_t)SIZE_MAX || required64 > (uint64_t)VM_MEMORY_HARD_LIMIT) {
+        fprintf(stderr,
+                "[VM ERR] %s: stack requerido=%llu bytes (SP=%u,+%u), limite duro=%zu.\n",
+                context ? context : "OP_RESERVAR_PILA",
+                (unsigned long long)required64,
+                (unsigned)vm->sp,
+                (unsigned)bytes_to_alloc,
+                VM_MEMORY_HARD_LIMIT);
+        return 0;
+    }
+
+    size_t required = (size_t)required64;
+    size_t new_size = vm->memory_size ? vm->memory_size : (1024u * 1024u);
+    while (new_size < required) {
+        size_t grown = new_size * 2u;
+        if (grown <= new_size) {
+            new_size = required;
+            break;
+        }
+        if (grown > VM_MEMORY_HARD_LIMIT) {
+            new_size = VM_MEMORY_HARD_LIMIT;
+            break;
+        }
+        new_size = grown;
+    }
+    if (new_size < required) return 0;
+
+    uint8_t* new_memory = (uint8_t*)realloc(vm->memory, new_size);
+    if (!new_memory) {
+        fprintf(stderr,
+                "[VM ERR] %s: fallo realloc al ampliar memoria a %zu bytes (actual=%zu).\n",
+                context ? context : "OP_RESERVAR_PILA",
+                new_size,
+                vm->memory_size);
+        return 0;
+    }
+
+    memset(new_memory + vm->memory_size, 0, new_size - vm->memory_size);
+    vm->memory = new_memory;
+    vm->memory_size = new_size;
+    return 1;
 }
 
 static void vm_format_source_path(VM* vm, char* out, size_t out_size) {
@@ -2994,24 +3122,107 @@ static int vm_error_memoria_sin_cerrar(VM* vm) {
 #endif
 }
 
+/* Función unificada para lectura segura de memoria */
+static int vm_leer_seguro(VM* vm, uint64_t addr, uint64_t* out_value, const char* context) {
+    // Validación segura sin overflow aritmético
+    if (addr > vm->memory_size || vm->memory_size - addr < 8) {
+        char trymsg[512];
+        uint32_t hash_id = (uint32_t)addr;
+        
+        // Diagnóstico mejorado y uniforme
+        if (addr < 1024) {
+            snprintf(trymsg, sizeof trymsg, 
+                "[ERROR VM] Violacion de acceso en OP_LEER%s: Intento de leer desde una direccion cercana a NULO (0x%08llX). PC=0x%08llX. Probablemente accediendo a campo de objeto no inicializado.", 
+                context, (unsigned long long)addr, (unsigned long long)vm->pc);
+        } else {
+            const char* txt = vm_text_cache_get(vm, hash_id);
+            if (!txt) txt = vm_text_cache_get(vm, hash_id & ~0x80000000u);
+            
+            if (txt) {
+                snprintf(trymsg, sizeof trymsg, 
+                    "[ERROR VM] Corrupcion de contexto%s: Se intento usar texto '%s' (hash 0x%08X) como direccion de memoria en OP_LEER. PC=0x%08llX. Esto ocurre al acceder a miembro de algo que no es objeto.", 
+                    context, txt, hash_id, (unsigned long long)vm->pc);
+            } else {
+                snprintf(trymsg, sizeof trymsg, 
+                    "[ERROR VM] Violacion de acceso en OP_LEER%s: direccion 0x%08llX fuera de limites (0-%zu). PC=0x%08llX.", 
+                    context, (unsigned long long)addr, vm->memory_size, (unsigned long long)vm->pc);
+            }
+        }
+        
+        // Integración con try/catch
+        if (vm_try_catch_or_abort(vm, trymsg)) return 0;
+        
+        fprintf(stderr, "%s\n", trymsg);
+        vm->running = 0;
+        vm->exit_code = 1;
+        return 0;
+    }
+    
+    // Lectura segura con memcpy
+    memcpy(out_value, vm->memory + addr, 8);
+    return 1;
+}
+
+/* Función unificada para escritura segura de memoria */
+static int vm_escribir_seguro(VM* vm, uint64_t addr, uint64_t value, const char* context) {
+    // Validación segura sin overflow aritmético
+    if (addr > vm->memory_size || vm->memory_size - addr < 8) {
+        char trymsg[512];
+        uint32_t hash_id = (uint32_t)addr;
+        
+        // Diagnóstico mejorado y uniforme
+        if (addr < 1024) {
+            snprintf(trymsg, sizeof trymsg, 
+                "[ERROR VM] Violacion de acceso en OP_ESCRIBIR%s: Intento de escribir en direccion cercana a NULO (0x%08llX). PC=0x%08llX. Probablemente asignando campo a objeto no inicializado.", 
+                context, (unsigned long long)addr, (unsigned long long)vm->pc);
+        } else {
+            const char* txt = vm_text_cache_get(vm, hash_id);
+            if (!txt) txt = vm_text_cache_get(vm, hash_id & ~0x80000000u);
+            
+            if (txt) {
+                snprintf(trymsg, sizeof trymsg, 
+                    "[ERROR VM] Corrupcion de contexto%s: Se intento usar texto '%s' (hash 0x%08X) como direccion de memoria en OP_ESCRIBIR. PC=0x%08llX. Esto ocurre al asignar miembro a algo que no es objeto.", 
+                    context, txt, hash_id, (unsigned long long)vm->pc);
+            } else {
+                snprintf(trymsg, sizeof trymsg, 
+                    "[ERROR VM] Violacion de acceso en OP_ESCRIBIR%s: direccion 0x%08llX fuera de limites (0-%zu). PC=0x%08llX.", 
+                    context, (unsigned long long)addr, vm->memory_size, (unsigned long long)vm->pc);
+            }
+        }
+        
+        // Integración con try/catch
+        if (vm_try_catch_or_abort(vm, trymsg)) return 0;
+        
+        fprintf(stderr, "%s\n", trymsg);
+        vm->running = 0;
+        vm->exit_code = 1;
+        return 0;
+    }
+    
+    // Escritura segura con memcpy
+    memcpy(vm->memory + addr, &value, 8);
+    return 1;
+}
+
 int vm_step(VM* vm) {
-    if (!vm || !vm->ir || !vm->running) return -1;
+    if (!vm || !vm->ir) return -1;
+    /* No usar -1 aqui si !running: el bucle rapido llama vm_step en default y trataba -1 como error fatal. */
+    if (!vm->running) return 0;
     
     // Verificar si estamos fuera de código
     size_t code_start = vm_code_start(vm->ir);
-    
-    if (vm->pc < code_start || vm->pc >= code_start + vm->ir->header.code_size) {
+    /* Solo ejecutar bytes que forman instrucciones completas: si header.code_size % 5 != 0,
+     * code_count (floor) * 5 es el limite real; evita inst_index == code_count y return -1
+     * al terminar la ultima instruccion (salida silenciosa con codigo 1). */
+    size_t code_exec_end = vm->ir->code_count * IR_INSTRUCTION_SIZE;
+    if (vm->pc < code_start || vm->pc >= code_start + code_exec_end) {
         vm->running = 0;
         return 0;  // Fin de ejecución
     }
-    
+
     // Obtener instrucción
     IRInstruction inst;
     size_t inst_index = (vm->pc - code_start) / IR_INSTRUCTION_SIZE;
-    if (inst_index >= vm->ir->code_count) {
-        vm->running = 0;
-        return -1;
-    }
     const uint8_t* code_ptr = vm->ir->code + (inst_index * IR_INSTRUCTION_SIZE);
     inst.opcode = code_ptr[0];
     inst.flags = code_ptr[1];
@@ -3065,41 +3276,10 @@ int vm_step(VM* vm) {
                 }
             }
             
-            /* PROTECCIÓN DE MEMORIA MEJORADA: 
-               Si la dirección está fuera de los límites de la memoria física de la VM. */
-            if (!vm_range_check(vm->memory_size, addr, sizeof(uint64_t), NULL) && addr != UINT64_MAX) {
-                char trymsg[512];
-                uint32_t hash_id = (uint32_t)addr;
-                
-                // 1. ¿Es un acceso a NULO?
-                if (addr < 1024) {
-                    snprintf(trymsg, sizeof trymsg, "[ERROR VM] Violacion de acceso en OP_LEER: Intento de leer desde una direccion cercana a NULO (0x%08llX). Probablemente estas accediendo a un campo de un objeto no inicializado.", (unsigned long long)addr);
-                } else {
-                    // 2. ¿Es un hash de texto usado como puntero?
-                    const char* txt = vm_text_cache_get(vm, hash_id);
-                    if (!txt) txt = vm_text_cache_get(vm, hash_id & ~0x80000000u);
-                    
-                    if (txt) {
-                        snprintf(trymsg, sizeof trymsg, "[ERROR VM] Corrupcion de contexto: Se intento usar el texto '%s' (hash 0x%08X) como una direccion de memoria en OP_LEER. Esto ocurre al intentar acceder a un miembro de algo que no es un objeto.", txt, hash_id);
-                    } else {
-                        // 3. Error de limites general
-                        snprintf(trymsg, sizeof trymsg, "[ERROR VM] Violacion de acceso en OP_LEER: direccion 0x%08llX fuera de limites (0-%zu).", (unsigned long long)addr, vm->memory_size);
-                    }
-                }
-                
-                if (vm_try_catch_or_abort(vm, trymsg)) return 0;
-                fprintf(stderr, "%s\n", trymsg);
-                vm->running = 0;
-                vm->exit_code = 1;
-                return 0;
-            }
-
-            // Lectura segura
+            // Lectura segura unificada
             uint64_t value = 0;
-            if (!vm_mem_read_u64_checked(vm, addr, &value)) {
-                vm->running = 0;
-                vm->exit_code = 1;
-                return 0;
+            if (!vm_leer_seguro(vm, addr, &value, " (vm_step)")) {
+                return 0; // Error ya manejado por vm_leer_seguro
             }
             vm_set_register(vm, inst.operand_a, value);
             
@@ -3131,40 +3311,9 @@ int vm_step(VM* vm) {
                 }
             }
             
-            /* PROTECCIÓN DE MEMORIA MEJORADA: 
-               Si la dirección está fuera de los límites de la memoria física de la VM. */
-            if (!vm_range_check(vm->memory_size, addr, sizeof(uint64_t), NULL) && addr != UINT64_MAX) {
-                char trymsg[512];
-                uint32_t hash_id = (uint32_t)addr;
-                
-                // 1. ¿Es un acceso a NULO?
-                if (addr < 1024) {
-                    snprintf(trymsg, sizeof trymsg, "[ERROR VM] Violacion de acceso en OP_ESCRIBIR: Intento de escribir en una direccion cercana a NULO (0x%08llX). Probablemente estas intentando asignar un campo a un objeto no inicializado.", (unsigned long long)addr);
-                } else {
-                    // 2. ¿Es un hash de texto usado como puntero?
-                    const char* txt = vm_text_cache_get(vm, hash_id);
-                    if (!txt) txt = vm_text_cache_get(vm, hash_id & ~0x80000000u);
-                    
-                    if (txt) {
-                        snprintf(trymsg, sizeof trymsg, "[ERROR VM] Corrupcion de contexto: Se intento usar el texto '%s' (hash 0x%08X) como una direccion de memoria en OP_ESCRIBIR. Esto ocurre al intentar asignar un miembro a algo que no es un objeto.", txt, hash_id);
-                    } else {
-                        // 3. Error de limites general
-                        snprintf(trymsg, sizeof trymsg, "[ERROR VM] Violacion de acceso en OP_ESCRIBIR: direccion 0x%08llX fuera de limites (0-%zu).", (unsigned long long)addr, vm->memory_size);
-                    }
-                }
-                
-                if (vm_try_catch_or_abort(vm, trymsg)) return 0;
-                fprintf(stderr, "%s\n", trymsg);
-                vm->running = 0;
-                vm->exit_code = 1;
-                return 0;
-            }
-
-            // Escritura segura
-            if (!vm_mem_write_u64_checked(vm, addr, b_val)) {
-                vm->running = 0;
-                vm->exit_code = 1;
-                return 0;
+            // Escritura segura unificada
+            if (!vm_escribir_seguro(vm, addr, b_val, " (vm_step)")) {
+                return 0; // Error ya manejado por vm_escribir_seguro
             }
             
             vm->pc += IR_INSTRUCTION_SIZE;
@@ -3544,6 +3693,33 @@ int vm_step(VM* vm) {
             break;
         }
 
+        case OP_MEM_MAPA_LLAVES: {
+            uint32_t map_id = (uint32_t)b_val;
+            uint32_t list_id = (uint32_t)0;
+#ifdef JASBOOT_LANG_INTEGRATION
+            JMNMemoria* m_target = (vm->mem_neuronal && jmn_mapa_existe(vm->mem_neuronal, map_id))
+                                   ? vm->mem_neuronal : vm->mem_colecciones;
+            if (!m_target) { ensure_jmn_col(vm); m_target = vm->mem_colecciones; }
+            if (m_target) {
+                ensure_jmn_col(vm);
+                list_id = vm_alloc_runtime_text_id(vm) | 0x80000000;
+                jmn_crear_lista(vm->mem_colecciones, list_id);
+                
+                uint32_t tam = jmn_mapa_tamano(m_target, map_id);
+                for (uint32_t i = 0; i < tam; i++) {
+                    uint32_t kid = jmn_mapa_obtener_llave(m_target, map_id, i);
+                    if (kid != 0) {
+                        JMNValor v; v.u = kid;
+                        jmn_lista_agregar(vm->mem_colecciones, list_id, v);
+                    }
+                }
+            }
+#endif
+            vm_set_register(vm, inst.operand_a, (uint64_t)list_id);
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+
         case OP_MEM_MAPA_CONTIENE: {
             uint32_t map_id_val = (uint32_t)b_val;
             uint32_t key_val = (uint32_t)c_val;
@@ -3611,7 +3787,14 @@ int vm_step(VM* vm) {
                 if (inst.flags & IR_INST_FLAG_B_IMMEDIATE) {
                     uint32_t target = (uint32_t)inst.operand_b;
                     if (inst.flags & IR_INST_FLAG_C_IMMEDIATE) target |= ((uint32_t)inst.operand_c << 8);
-                    size_t next_pc = (inst.flags & IR_INST_FLAG_RELATIVE) ? (vm->pc + (size_t)target) : (code_start + (size_t)target);
+                    size_t next_pc;
+                    if (inst.flags & IR_INST_FLAG_RELATIVE) {
+                        /* Desplazamiento firmado 16 bits desde el fin de esta instruccion (PATCH_SI; ver resolve_patches). */
+                        int32_t rel = (int16_t)(target & 0xFFFFu);
+                        next_pc = (size_t)((int64_t)vm->pc + (int64_t)IR_INSTRUCTION_SIZE + (int64_t)rel);
+                    } else {
+                        next_pc = code_start + (size_t)target;
+                    }
                     vm->pc = next_pc;
                 } else {
                     size_t next_pc = (inst.flags & IR_INST_FLAG_RELATIVE) ? (vm->pc + (size_t)b_val) : (code_start + (size_t)b_val);
@@ -3687,9 +3870,14 @@ int vm_step(VM* vm) {
             uint32_t bytes_to_alloc = (uint32_t)inst.operand_a 
                                     | ((uint32_t)inst.operand_b << 8) 
                                     | ((uint32_t)inst.operand_c << 16);
+            /* Salvaguarda: evitar crecimiento acumulativo si se re-ejecuta el prólogo del mismo frame. */
+            if (vm->sp > vm->fp) {
+                vm->pc += IR_INSTRUCTION_SIZE;
+                break;
+            }
             // printf("[VM DBG] RESERVAR_PILA: %u bytes\n", bytes_to_alloc);
-            if (vm->sp + bytes_to_alloc > vm->memory_size) {
-                 const char *ms = "[VM ERR] Memory Stack Exhausted";
+            if (!vm_ensure_stack_space(vm, bytes_to_alloc, "OP_RESERVAR_PILA")) {
+                 const char *ms = "[VM ERR] Memory Stack Exhausted (sin crecimiento posible)";
                  if (vm_try_catch_or_abort(vm, ms)) return 0;
                  fprintf(stderr, "%s\n", ms);
                  vm->running = 0;
@@ -3908,11 +4096,14 @@ int vm_step(VM* vm) {
 
         case OP_ID_A_TEXTO: {
             uint32_t id = (uint32_t)vm_get_register(vm, inst.operand_b);
-            if (vm->mem_neuronal) {
-                char buf[1024];
-                if (jmn_obtener_texto(vm->mem_neuronal, id, buf, sizeof(buf)) >= 0 && buf[0]) {
-                    uint32_t tid = vm_alloc_runtime_text_id(vm);
-                    vm_text_cache_put_owned(vm, tid, strdup(buf), strlen(buf));
+            /* Misma resolución que buscar/imprimir: texto puede estar solo en caché VM
+             * (p. ej. literal reciente) sin fila JMN; jmn_obtener_texto solo fallaba y dejaba el id crudo. */
+            char buf[1024];
+            if (vm_text_cache_get_copy(vm, id, buf, sizeof(buf)) && buf[0]) {
+                uint32_t tid = vm_alloc_runtime_text_id(vm);
+                char* owned = strdup(buf);
+                if (owned) {
+                    vm_text_cache_put_owned(vm, tid, owned, strlen(owned));
                     vm_set_register(vm, inst.operand_a, (uint64_t)tid);
                 } else {
                     vm_set_register(vm, inst.operand_a, (uint64_t)id);
@@ -4488,213 +4679,13 @@ int vm_step(VM* vm) {
         
         case OP_MEM_IMPRIMIR_ID: {
             uint32_t id = (uint32_t)vm_get_register(vm, inst.operand_a);
-            int impreso = 0;
-
 #ifdef JASBOOT_LANG_INTEGRATION
-            // 0. Prioridad: cache y JMN texto (evitar {3:1} cuando el texto sí existe)
-            const char* cached_name = vm_text_cache_get(vm, id);
-            if (cached_name && cached_name[0]) {
-                vm_escribir_cadena(cached_name);
-                impreso = 1;
-            }
-            if (!impreso && vm->mem_neuronal && id != 0) {
-                char buf_txt[512];
-                if (jmn_obtener_texto(vm->mem_neuronal, id, buf_txt, sizeof(buf_txt)) >= 0 && buf_txt[0]) {
-                    vm_text_cache_put(vm, id, buf_txt);
-                    vm_escribir_cadena(buf_txt);
-                    impreso = 1;
-                }
-            }
-            if (impreso) {
-                vm->pc += IR_INSTRUCTION_SIZE;
-                break;
-            }
-
-            // 1. Intentar colecciones (listas/mapas/vectores)
-            JMNMemoria* m_col = vm->mem_colecciones;
-            JMNMemoria* m_neu = vm->mem_neuronal;
-            
-            JMNMemoria* memorias[] = { m_col, m_neu };
-            for (int m = 0; m < 2; m++) {
-                if (impreso || !memorias[m]) continue;
-                
-                uint32_t tam = jmn_lista_tamano(memorias[m], id);
-                JMNNodo* nodo = jmn_obtener_nodo(memorias[m], id);
-                
-                if (tam > 0 || nodo) {
-                    /* Prioridad: mostrar texto del concepto, nunca el mapa interno {1: 1} */
-                    int imprimir_brackets = 1;
-                    int es_mapa = 0;
-                    uint32_t c_count = 0;
-                    JMNConexion* conexiones = jmn_obtener_conexiones(memorias[m], nodo, &c_count);
-                    if (conexiones && c_count > 0) {
-                        for (uint32_t j = 0; j < c_count; j++) {
-                            uint32_t kid = conexiones[j].key_id;
-                            if (kid != 0 && (kid < 0x10000000 || kid > 0x1000FFFF)) {
-                                es_mapa = 1;
-                                break;
-                            }
-                        }
-                    }
-                    if (cached_name && cached_name[0]) {
-                        vm_escribir_cadena(cached_name);
-                        impreso = 1;
-                        imprimir_brackets = 0;
-                    } else if (m == 1 && tam == 0 && memorias[m]) {
-                        /* Concepto en JMN: intentar obtener texto (cache, JMN) antes de mapa */
-                        char buf_texto[512];
-                        if (jmn_obtener_texto(memorias[m], id, buf_texto, sizeof(buf_texto)) >= 0 && buf_texto[0]) {
-                            vm_text_cache_put(vm, id, buf_texto);
-                            vm_escribir_cadena(buf_texto);
-                            impreso = 1;
-                            imprimir_brackets = 0;
-                        }
-                    }
-                    /* Solo imprimir mapa/lista si no es un concepto con texto (evitar {1: 1}) */
-                    if (m == 1 && tam == 0 && es_mapa) {
-                        /* Intentar texto del primer destino con tipo SECUENCIA/ASOCIACION antes de "?" */
-                        int fallback_ok = 0;
-                        for (uint32_t j = 0; j < c_count && !fallback_ok; j++) {
-                            uint32_t dest = conexiones[j].destino_id;
-                            if (dest == 0 || dest == id) continue;
-                            char buf_dest[512];
-                            if (jmn_obtener_texto(memorias[m], dest, buf_dest, sizeof(buf_dest)) >= 0 && buf_dest[0]) {
-                                vm_escribir_cadena(buf_dest);
-                                fallback_ok = 1;
-                            }
-                        }
-                        if (!fallback_ok) vm_escribir_cadena("?");
-                        impreso = 1;
-                        imprimir_brackets = 0;
-                    }
-                    if (imprimir_brackets) {
-                    /* Evitar {1:1} {3:1}: si es mapa interno, intentar texto de destinos; si no hay, imprimir ? */
-                    if (es_mapa && c_count > 0) {
-                        int fallback_ok = 0;
-                        for (uint32_t j = 0; j < c_count && j < 64 && !fallback_ok; j++) {
-                            uint32_t dest = conexiones[j].destino_id;
-                            if (dest == 0 || dest == id) continue;
-                            char buf_dest[512];
-                            if (m_neu && jmn_obtener_texto(m_neu, dest, buf_dest, sizeof(buf_dest)) >= 0 && buf_dest[0]) {
-                                vm_escribir_cadena(buf_dest);
-                                fallback_ok = 1;
-                            } else if (memorias[m] && jmn_obtener_texto(memorias[m], dest, buf_dest, sizeof(buf_dest)) >= 0 && buf_dest[0]) {
-                                vm_escribir_cadena(buf_dest);
-                                fallback_ok = 1;
-                            }
-                        }
-                        if (!fallback_ok) {
-                            vm_escribir_cadena("?");
-                            fallback_ok = 1;
-                        }
-                        if (fallback_ok) {
-                            impreso = 1;
-                            imprimir_brackets = 0;
-                        }
-                    }
-                    if (imprimir_brackets) {
-                    vm_escribir_cadena(es_mapa ? "{" : "[");
-                    if (es_mapa) {
-                        int first = 1;
-                        for (uint32_t j = 0; j < c_count; j++) {
-                            if (conexiones[j].key_id == 0 || conexiones[j].destino_id == 0) continue;
-                            if (!first) vm_escribir_cadena(", ");
-                            first = 0;
-                            
-                            // Imprimir Clave
-                            const char* k_txt = vm_text_cache_get(vm, conexiones[j].key_id);
-                            if (k_txt) vm_escribir_cadena(k_txt);
-                            else { char b[32]; snprintf(b, sizeof(b), "%u", conexiones[j].key_id); vm_escribir_cadena(b); }
-                            
-                            vm_escribir_cadena(": ");
-                            
-                            // Imprimir Valor
-                            uint32_t item_node_id = conexiones[j].destino_id;
-                            JMNNodo* v_nodo = jmn_obtener_nodo(memorias[m], item_node_id);
-                            uint32_t val_id = v_nodo ? v_nodo->peso.u : 0;
-                            const char* v_txt = val_id ? vm_text_cache_get(vm, val_id) : NULL;
-                            char v_buf[512];
-                            if (!v_txt && val_id && m_neu && jmn_obtener_texto(m_neu, val_id, v_buf, sizeof(v_buf)) >= 0 && v_buf[0])
-                                v_txt = v_buf;
-                            if (v_txt) {
-                                vm_escribir_cadena("\""); vm_escribir_cadena(v_txt); vm_escribir_cadena("\"");
-                            } else {
-                                JMNValor weight = v_nodo ? v_nodo->peso : (JMNValor){0};
-                                char b[64];
-                                // Heurística: si parece un ID de texto o un float razonable
-                                if (weight.u > 0 && weight.u < 1000000) {
-                                    snprintf(b, sizeof(b), "%u", weight.u);
-                                } else if (weight.f == (float)((long long)weight.f)) {
-                                    snprintf(b, sizeof(b), "%lld", (long long)weight.f);
-                                } else {
-                                    snprintf(b, sizeof(b), "%.2f", weight.f);
-                                }
-                                vm_escribir_cadena(b);
-                            }
-                        }
-                    } else {
-                        // Es una lista tradicional
-                        for (uint32_t i = 0; i < tam; i++) {
-                            JMNValor v = jmn_lista_obtener(memorias[m], id, i);
-                            const char* v_txt = v.u ? vm_text_cache_get(vm, v.u) : NULL;
-                            char v_li[512];
-                            if (!v_txt && v.u && m_neu && jmn_obtener_texto(m_neu, v.u, v_li, sizeof(v_li)) >= 0 && v_li[0])
-                                v_txt = v_li;
-                            if (v_txt) {
-                                vm_escribir_cadena("\""); vm_escribir_cadena(v_txt); vm_escribir_cadena("\"");
-                            } else {
-                                char b[64];
-                                if (v.u > 0 && v.u < 1000000) {
-                                    snprintf(b, sizeof(b), "%u", v.u);
-                                } else if (v.f == (float)((long long)v.f)) {
-                                    snprintf(b, sizeof(b), "%lld", (long long)v.f);
-                                } else {
-                                    snprintf(b, sizeof(b), "%.2f", v.f);
-                                }
-                                vm_escribir_cadena(b);
-                            }
-                            if (i < tam - 1) vm_escribir_cadena(", ");
-                            if (i >= 50) { vm_escribir_cadena("..."); break; }
-                        }
-                    }
-                    vm_escribir_cadena(es_mapa ? "}" : "]");
-                    impreso = 1;
-                    }
-                    }
-                }
-            }
-
-            // 2. Intentar texto en memoria neuronal cognitiva si no se imprimió como colección (ids hash suelen ser < 0x10000)
-            if (!impreso && m_neu && id != 0) {
-                char buffer[4096];
-                buffer[0] = '\0';
-                if (jmn_obtener_texto(m_neu, id, buffer, sizeof(buffer)) >= 0 && buffer[0]) {
-                    vm_text_cache_put(vm, id, buffer);
-                    vm_escribir_cadena(buffer);
-                    impreso = 1;
-                }
-            }
+            JMNValor v;
+            v.u = id;
+            vm_imprimir_valor_recursivo(vm, v, 0);
+#else
+            vm_escribir_entero((uint64_t)id);
 #endif
-            // 3. Intentar texto en cache (literal o IDs registrados)
-            if (!impreso) {
-                const char* cached = vm_text_cache_get(vm, id);
-                if (cached && cached[0]) {
-                    vm_escribir_cadena(cached);
-                    impreso = 1;
-                }
-            }
-
-            // 4. Fallback: Heurística de flotante vs entero
-            if (!impreso) {
-                uint32_t exp = (id >> 23) & 0xFF;
-                if (id > 1000000 && exp > 0x30 && exp < 0xA0) {
-                    union { uint32_t u; float f; } cast;
-                    cast.u = id;
-                    vm_escribir_flotante(cast.f);
-                } else {
-                    vm_escribir_entero((uint64_t)id);
-                }
-            }
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
@@ -5769,9 +5760,28 @@ int vm_step(VM* vm) {
         }
 
         case OP_STR_DESDE_NUMERO: {
-            uint64_t reg_val = vm_get_register(vm, inst.operand_b);
-            char buf[64];
+            uint32_t id = (uint32_t)vm_get_register(vm, inst.operand_b);
             
+            /* Si ya es un texto en cache o JMN, devolverlo directamente */
+            const char* cached = vm_text_cache_get(vm, id);
+            if (cached) {
+                vm_set_register(vm, inst.operand_a, (uint64_t)id);
+                vm->pc += IR_INSTRUCTION_SIZE;
+                break;
+            }
+#ifdef JASBOOT_LANG_INTEGRATION
+            if (vm->mem_neuronal) {
+                char buf_txt[512];
+                if (jmn_obtener_texto(vm->mem_neuronal, id, buf_txt, sizeof(buf_txt)) >= 0 && buf_txt[0]) {
+                    vm_text_cache_put(vm, id, buf_txt);
+                    vm_set_register(vm, inst.operand_a, (uint64_t)id);
+                    vm->pc += IR_INSTRUCTION_SIZE;
+                    break;
+                }
+            }
+#endif
+
+            char buf[64];
             // Flag de tipo en operand_c (1=entero, 0=float)
             int is_int = 0;
             if (inst.flags & IR_INST_FLAG_C_IMMEDIATE) {
@@ -5781,12 +5791,15 @@ int vm_step(VM* vm) {
             }
 
             if (is_int) {
-                snprintf(buf, sizeof(buf), "%lld", (long long)reg_val);
+                snprintf(buf, sizeof(buf), "%lld", (long long)id);
             } else {
                 union { uint32_t u32; float f32; } u;
-                u.u32 = (uint32_t)reg_val;
+                u.u32 = id;
                 float val = u.f32;
-                snprintf(buf, sizeof(buf), "%.2f", (double)val);
+                if (val == (float)((long long)val))
+                    snprintf(buf, sizeof(buf), "%lld", (long long)val);
+                else
+                    snprintf(buf, sizeof(buf), "%.4f", (double)val);
             }
             
             uint32_t id_res = vm_hash_texto(buf);
@@ -5825,7 +5838,7 @@ int vm_step(VM* vm) {
                     if (f == (float)((long int)f)) {
                         snprintf(buf, sizeof(buf), "%ld", (long int)f);
                     } else {
-                        snprintf(buf, sizeof(buf), "%.2f", (double)f);
+                        snprintf(buf, sizeof(buf), "%.4f", (double)f);
                     }
                 } else {
                     snprintf(buf, sizeof(buf), "%lld", (long long)reg_val);
@@ -8369,7 +8382,7 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
     // Optimizacion "computed goto" (si soportado por GCC, de lo contrario un switch unrolled normal)
     uint64_t* regs = vm->registers;
     const uint8_t* code_base = vm->ir->code;
-    size_t code_size = vm->ir->header.code_size;
+    size_t code_exec_end = vm->ir->code_count * IR_INSTRUCTION_SIZE;
 
     #if defined(__GNUC__) && !defined(__clang_analyzer__) && 0
     static void* dispatch_table[256] = { 0 };
@@ -8407,7 +8420,7 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
     }
     
     #define FETCH() \
-        if (vm->pc >= code_size) { vm->running = 0; goto vm_end; } \
+        if (vm->pc >= code_exec_end) { vm->running = 0; goto vm_end; } \
         code_ptr = code_base + vm->pc; \
         opcode = code_ptr[0]; flags = code_ptr[1]; op_a = code_ptr[2]; op_b = code_ptr[3]; op_c = code_ptr[4]; \
         if (opcode != OP_DEBUG_LINE) { \
@@ -8534,7 +8547,7 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
         STEP_AND_DISPATCH();
 
     op_no:
-        regs[op_a] = ~b_val;
+        regs[op_a] = (b_val == 0) ? 1 : 0;
         vm->pc += IR_INSTRUCTION_SIZE;
         STEP_AND_DISPATCH();
 
@@ -8633,8 +8646,10 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
     #undef STEP_AND_DISPATCH
     #else
     while (vm->running) {
-        if (vm->pc >= code_size) {
+        if (vm->pc >= code_exec_end) {
             vm->running = 0;
+            /* Fin alineado a instrucciones completas: no arrastrar exit_code de intentos/errores previos. */
+            vm->exit_code = 0;
             break;
         }
 
@@ -8671,6 +8686,7 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
         switch (opcode) {
             case OP_HALT:
                 vm->running = 0;
+                vm->exit_code = 0;
                 break;
             case OP_SUMAR:
                 STORE_REG_FAST(op_a, b_val + c_val);
@@ -8753,6 +8769,7 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
                 vm->pc += IR_INSTRUCTION_SIZE;
                 break;
             case OP_NO:
+                /* Negacion logica (0 -> 1, distinto de 0 -> 0), no complemento a bits. */
                 STORE_REG_FAST(op_a, (b_val == 0) ? 1 : 0);
                 vm->pc += IR_INSTRUCTION_SIZE;
                 break;
@@ -8765,12 +8782,11 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
                 vm->pc += IR_INSTRUCTION_SIZE;
                 break;
             case OP_SI:
-                if (a_val != 0) {
-                    uint64_t addr = b_val;
-                    if (flags & IR_INST_FLAG_C_IMMEDIATE) addr |= ((uint64_t)op_c << 8);
-                    vm->pc = addr;
-                } else {
-                    vm->pc += IR_INSTRUCTION_SIZE;
+                /* OP_SI (trampolin emit_jump_if_nonzero / PATCH_SI) debe coincidir con vm_step:
+                 * destino relativo 16 bits, IR absoluto 24 bits, etc. Evitar duplicar logica en el switch rapido. */
+                if (vm_step(vm) != 0) {
+                    if (vm->exit_code == 0) vm->exit_code = 1;
+                    return vm->exit_code;
                 }
                 break;
             case OP_MOVER: {
@@ -8794,18 +8810,12 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
                 if ((flags & IR_INST_FLAG_RELATIVE) && !vm_addr_add_u32(addr, vm->fp, &addr)) {
                     addr = UINT64_MAX;
                 }
-                {
-                    uint64_t val = 0;
-                    if (vm_mem_read_u64_checked(vm, addr, &val)) {
-                        STORE_REG_FAST(op_a, val);
-                    } else {
-                        fprintf(stderr, "[ERROR VM] Violacion de acceso en OP_LEER: direccion 0x%llX fuera de limites (0-%llX).\n",
-                                (unsigned long long)addr, (unsigned long long)vm->memory_size);
-                        vm->running = 0;
-                        vm->exit_code = 11;
-                        return 11;
-                    }
+                
+                uint64_t val = 0;
+                if (!vm_leer_seguro(vm, addr, &val, " (ruta rapida)")) {
+                    return vm->exit_code;
                 }
+                STORE_REG_FAST(op_a, val);
                 vm->pc += IR_INSTRUCTION_SIZE;
                 break;
             }
@@ -8821,13 +8831,8 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
                 if ((flags & IR_INST_FLAG_RELATIVE) && !vm_addr_add_u32(addr, vm->fp, &addr)) {
                     addr = UINT64_MAX;
                 }
-                if (vm_mem_write_u64_checked(vm, addr, b_val)) {
-                } else {
-                    fprintf(stderr, "[ERROR VM] Violacion de acceso en OP_ESCRIBIR: direccion 0x%llX fuera de limites (0-%llX).\n", 
-                            (unsigned long long)addr, (unsigned long long)vm->memory_size);
-                    vm->running = 0;
-                    vm->exit_code = 11;
-                    return 11;
+                if (!vm_escribir_seguro(vm, addr, b_val, " (ruta rapida)")) {
+                    return vm->exit_code;
                 }
                 vm->pc += IR_INSTRUCTION_SIZE;
                 break;

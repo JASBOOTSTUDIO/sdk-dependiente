@@ -140,7 +140,8 @@
 #define OP_MEM_MAPA_OBTENER  0x63
 #define OP_MEM_MAPA_BORRAR   0xE3 /* A: map_id, B: key_id (penalizar se usa para borrar en mapas) */
 #define OP_MEM_MAPA_TAMANO   0x7E /* A <- numero de entradas (B: map_id reg) */
-#define OP_MEM_MAPA_CONTIENE 0x08 /* A <- 1 si clave C existe en mapa B, else 0 */
+#define OP_MEM_MAPA_LLAVES   0x0C /* A <- lista_id con llaves (B: map_id reg) */
+#define OP_MEM_MAPA_CONTIENE 0x0D /* A <- 1 si clave C existe en mapa B, else 0 */
 
 #define OP_MEM_MAPA_CREAR    0x61
 #define OP_MEM_MAPA_PONER    0x62

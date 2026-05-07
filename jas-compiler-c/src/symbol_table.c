@@ -1,6 +1,7 @@
 /* Implementación tabla de símbolos - Nivel 3 */
 
 #include "symbol_table.h"
+#include "keywords.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -30,12 +31,12 @@ void sym_init(SymbolTable *st) {
 void sym_init_global(SymbolTable *st) {
     sym_init(st);
     /* Simbolo magico para resultados de operaciones (JMN, etc.) 
-       Ahora quedara en la direccion 0x0800 global para evitar conflictos con strings. */
-    st->next_global_offset = 0x0800;
-    sym_declare(st, "resultado", "elemento", 8, 0, 0, NULL);
+       Ahora quedara en la direccion 0x100000 global (1MB) para evitar conflictos con strings en programas masivos. */
+    st->next_global_offset = 0x100000;
+    sym_declare(st, "resultado", "elemento", 8, 0, 0, NULL, SYMDECL_FLAGS_ALLOW_RESERVED_NAME);
     
-    /* Reajustar el offset para el resto de globales a 0x0808 para mantener compatibilidad */
-    st->next_global_offset = 0x0808;
+    /* Reajustar el offset para el resto de globales a 0x100008 para mantener consistencia */
+    st->next_global_offset = 0x100008;
 }
 
 void sym_free(SymbolTable *st) {
@@ -99,9 +100,12 @@ int sym_exit_scope(SymbolTable *st) {
 }
 
 /* 3.2/3.3/3.4 */
-SymResult sym_declare(SymbolTable *st, const char *name, const char *type_name, size_t size, int is_param, int is_const, const char *lista_elem_type) {
+SymResult sym_declare(SymbolTable *st, const char *name, const char *type_name, size_t size, int is_param, int is_const, const char *lista_elem_type, int sym_flags) {
     SymResult r = {0, 0, 0, 0, NULL, NULL};
     if (!name || strlen(name) >= SYM_ENTRY_NAME_MAX) return r;
+
+    if (!(sym_flags & SYMDECL_FLAGS_ALLOW_RESERVED_NAME) && is_reserved_identifier(name))
+        return r;
 
     size_t depth = st->scope_depth - 1;
     if (find_in_scope(st->scopes[depth], name))
@@ -143,7 +147,12 @@ SymResult sym_declare(SymbolTable *st, const char *name, const char *type_name, 
 }
 
 SymResult sym_declare_macro(SymbolTable *st, const char *name, void *macro_ast) {
-    SymResult r = sym_declare(st, name, "macro", 0, 0, 1, NULL);
+    SymResult empty = {0, 0, 0, 0, NULL, NULL};
+    if (!name || strlen(name) >= SYM_ENTRY_NAME_MAX)
+        return empty;
+    if (is_reserved_identifier(name))
+        return empty;
+    SymResult r = sym_declare(st, name, "macro", 0, 0, 1, NULL, SYMDECL_FLAGS_NONE);
     if (r.found) {
         SymbolEntry *e = find_in_scope(st->scopes[st->scope_depth - 1], name);
         if (e) {
@@ -224,7 +233,9 @@ SymResult sym_get_or_create(SymbolTable *st, const char *name, const char *type_
     SymResult r = sym_lookup(st, name);
     if (r.found)
         return r;
-    return sym_declare(st, name, type_name, DEFAULT_SIZE, 0, 0, NULL);
+    if (is_reserved_identifier(name))
+        return (SymResult){0, 0, 0, 0, NULL, NULL};
+    return sym_declare(st, name, type_name, DEFAULT_SIZE, 0, 0, NULL, SYMDECL_FLAGS_NONE);
 }
 
 /* 3.7 */
@@ -528,9 +539,20 @@ const char *sym_get_struct_lista_elem_type(SymbolTable *st, const char *struct_n
 
     for (size_t j = 0; j < si->n_fields; j++) {
         if (strcmp(si->fields[j].name, field_name) == 0) {
-            /* Extraer T de lista<T> */
             const char *tn = si->fields[j].type_name;
-            if (tn && strncmp(tn, "lista<", 6) == 0) {
+            if (!tn) return NULL;
+            
+            /* Caso 1: T[] */
+            size_t len = strlen(tn);
+            if (len > 2 && tn[len-2] == '[' && tn[len-1] == ']') {
+                static char buf[128];
+                strncpy(buf, tn, len - 2);
+                buf[len - 2] = '\0';
+                return buf;
+            }
+            
+            /* Caso 2: lista<T> */
+            if (strncmp(tn, "lista<", 6) == 0) {
                 char *p = strchr(tn, '<');
                 if (p) {
                     static char buf[128];
