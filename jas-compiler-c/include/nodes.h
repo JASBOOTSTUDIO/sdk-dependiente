@@ -50,6 +50,7 @@ typedef enum {
     NODE_JSON_LITERAL, /* Misma forma que MapLiteralNode: claves texto, valores solo literales/anidados */
     NODE_INDEX_ACCESS,
     NODE_INDEX_ASSIGNMENT,
+    NODE_FOR,
     NODE_TERNARY,
     NODE_UNARY_OP,
     NODE_POSTFIX_UPDATE,
@@ -92,6 +93,7 @@ typedef struct {
     ASTNode *body;     /* BlockNode */
     int is_exported;   /* 1 si lleva `enviar` (visible desde otros archivos con usar filtrado) */
     int is_async;      /* 1 si se declaro con `asincrono` (planificacion real: trabajo futuro en VM) */
+    char *diag_source_unit; /* .jasb de origen tras fusion `usar` (NULL = unidad de compilacion principal) */
 } FunctionNode;
 
 /* 2.2 Declaraciones */
@@ -103,12 +105,14 @@ typedef struct {
     int is_const;  /* 1 si es constante (inmutable) */
     int is_exported; /* 1 si declaracion global lleva `enviar` */
     char *list_element_type; /* para `lista<T>`: T (entero, flotante, ...); NULL si no aplica */
+    char *diag_source_unit; /* NULL = unidad principal; seteado al fusionar globales desde modulo */
 } VarDeclNode;
 
 typedef struct {
     ASTNode base;
     char *name;
-    char *extends_name; /* NULL si no hay `extiende Base`; solo clases/registros con herencia */
+    char **extends_names; /* NULL si no hay `extiende Base1, Base2...` */
+    size_t n_extends;
     char **field_types;
     char **field_names;
     size_t n_fields;
@@ -120,6 +124,7 @@ typedef struct {
     int *method_visibilities; /* 0=publico, 1=privado */
     int is_exported;
     int is_clase;
+    char *diag_source_unit; /* .jasb de origen tras fusion `usar` (NULL = unidad principal) */
 } StructDefNode;
 
 /* 2.3 Expresiones */
@@ -185,6 +190,14 @@ typedef struct {
     ASTNode base;
     ASTNode *condition;
 } EndDoWhileNode;
+
+typedef struct {
+    ASTNode base;
+    ASTNode *init;
+    ASTNode *condition;
+    ASTNode *step;
+    ASTNode *body;
+} ForNode;
 
 typedef struct {
     ASTNode base;

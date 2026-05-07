@@ -257,6 +257,21 @@ JMNValor jmn_mapa_obtener(JMNMemoria* mem, uint32_t map_id, uint32_t key) {
     return v;
 }
 
+uint32_t jmn_mapa_obtener_llave(JMNMemoria* mem, uint32_t map_id, uint32_t idx) {
+    if (!mem || !mem->mapas) return 0;
+    uint32_t slot = map_id % 10000u;
+    if (!mem->mapas[slot].keys || idx >= mem->mapas[slot].count) return 0;
+    return mem->mapas[slot].keys[idx];
+}
+
+JMNValor jmn_mapa_obtener_valor_por_indice(JMNMemoria* mem, uint32_t map_id, uint32_t idx) {
+    JMNValor z = {0};
+    if (!mem || !mem->mapas) return z;
+    uint32_t slot = map_id % 10000u;
+    if (!mem->mapas[slot].vals || idx >= mem->mapas[slot].count) return z;
+    return mem->mapas[slot].vals[idx];
+}
+
 int jmn_mapa_existe(JMNMemoria* mem, uint32_t map_id) {
     if (!mem || !mem->mapas) return 0;
     uint32_t slot = map_id % 10000u;

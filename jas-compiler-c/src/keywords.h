@@ -17,6 +17,8 @@ extern const size_t KEYWORDS_COUNT;
 extern const char *const OPERATORS_SINGLE;
 int is_keyword(const char *str, size_t len);
 int is_forbidden(const char *str, size_t len);
+/* Cadena C completa: coincide con keyword española o palabra prohibida en inglés */
+int is_reserved_identifier(const char *name);
 int is_operator_single(char c);
 int is_operator_double(const char *s, size_t len, char *out_two);
 

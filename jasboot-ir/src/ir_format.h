@@ -146,6 +146,9 @@ typedef enum {
     OP_TAN = 0x97,         // A <- tan(B) radianes, flotante
     OP_STR_FLOTANTE_PREC = 0x8F, // A ← id texto: formatear (float)B con C decimales (C inm 0..20 o reg entero)
     OP_STR_DESDE_NUMERO = 0x98, // A ← string(B)
+    OP_STR_DESDE_ANY = 0x49,    // A ← string(B) heuristico
+    OP_CONV_ANY2F = 0x4A,       // A ← (float)B (int/float heuristico)
+    OP_CONV_ANY2I = 0x4B,       // A ← (int)B (int/float heuristico)
     OP_ATAN2 = 0x99,       // A <- atan2(B=y, C=x) radianes, flotante
     OP_MAT4_MUL_VEC4 = 0x9B,  // dest(A), mat(B), vec(C) = direcciones en bytes (regs)
     OP_MAT4_MUL = 0x9C,        // dest(A), matL(B), matR(C) = direcciones en bytes (regs)
@@ -220,7 +223,8 @@ typedef enum {
     OP_MEM_MAPA_PONER = 0x62,        // SetMap(A:map_id, B:key_id, C:val_reg)
     OP_MEM_MAPA_OBTENER = 0x63,      // A <- GetMap(B:map_id, C:key_id)
     OP_MEM_MAPA_TAMANO = 0x7E,       // A <- count entries (B: map_id reg)
-    OP_MEM_MAPA_CONTIENE = 0x08,     // A <- 1 if key C exists in map B, else 0
+    OP_MEM_MAPA_LLAVES = 0x0C,       // A <- lista_id con llaves (B: map_id reg)
+    OP_MEM_MAPA_CONTIENE = 0x0D,     // A <- 1 if key C exists in map B, else 0
     OP_FS_LEER_BYTE = 0x64,          // A <- fgetc(handle B)
     OP_FS_ESCRIBIR_U32 = 0x65,       // fwrite(u32 B, f handle A)
     OP_FS_LEER_ARCHIVO_REG = 0x66,   // A: path_reg, B: dest_id_reg
@@ -251,6 +255,7 @@ typedef enum {
     OP_BYTES_ANEXAR = 0x7D,          // A <- append(bytes B, bytes/texto C)
     OP_BYTES_PUNTERO = 0x27,         // A <- puntero crudo de bytes B
     OP_PAUSA_MILISEGUNDOS = 0x28,    // Duerme el hilo del VM: B = ms (reg); A <- 1 (bloqueante; no multitarea)
+    OP_STR_FORMATEAR_TIMESTAMP = 0x29, // A <- Texto formateado de timestamp B con formato C
     OP_BYTES_SUBBYTES = 0x7F,        // A <- subbytes(B, C, reg(B+1)=len)
     OP_BYTES_DESDE_TEXTO = 0x80,     // A <- bytes utf8(B)
     OP_BYTES_A_TEXTO = 0x81,         // A <- texto desde bytes B
@@ -273,9 +278,12 @@ typedef enum {
     OP_MEM_BUSCAR_ASOCIADOS = 0xC9,   // A <- mejor asociado de B (tipo C); umbral 0.1, prof 2
     OP_MEM_BUSCAR_ASOCIADOS_LISTA = 0xCA, // A <- lista con top-K ids asociados a B; C = tipo|(K<<8)
     OP_MEM_OBTENER_VALOR = 0xCB,      // A = valor en clave B (recordar); tipo ASOCIACION; si no hay, A=B
-    OP_MEM_DECAE_CONEXIONES = 0xCC,   // Decaimiento global; A=reg ok; B,C inm opcional factor%/1000‰ umbral
-    OP_MEM_PROPAGAR_ACTIVACION = 0xCD, // A <- mejor id por propagación; B=origen, C=tipo|(K<<8)|(prof<<16)
-    OP_MEM_RESOLVER_CONFLICTOS = 0xCE, // A <- id_ganador; B=origen, C=tipo; cuando 2+ candidatos con peso similar
+    OP_MEM_BUSCAR_INTROSPECTIVA = 0xCC, // A <- primer ID que contiene texto B (case insensitive)
+    OP_MEM_BUSCAR_INTROSPECTIVA_LISTA = 0x09, // A <- lista_id con IDs; B=termino_id, C=max_resultados
+    OP_MEM_BUSCAR_INTROSPECTIVA_CS = 0x0A, // A <- primer ID; B=termino_id, C=case_sensitive(0/1)
+    OP_MEM_BUSCAR_INTROSPECTIVA_DETALLADA = 0x0B, // A <- lista_id con metadata; B=termino, C=max|(cs<<8)
+    OP_MEM_DECAE_CONEXIONES = 0xCD,   // Decaimiento global; A=reg ok; B,C inm opcional factor%/1000‰ umbral
+    OP_MEM_PROPAGAR_ACTIVACION = 0xCE, // A <- mejor id por propagación; B=origen, C=tipo|(K<<8)|(prof<<16)
     OP_STR_EXTRAER_ANTES_REG = 0xD8,   // Extraer (regs: A=frase, B=patron) -> C=dest_reg
     OP_STR_EXTRAER_DESPUES_REG = 0xD9, // Extraer (regs: A=frase, B=patron) -> C=dest_reg
     OP_STR_CONCATENAR = 0xD2,        // Concatenar A y B en destino
@@ -348,7 +356,8 @@ typedef enum {
     OP_MEM_OBTENER_TODOS = 0xFE,      // A <- Obtener lista de todos los IDs
     OP_NOP = 0xFF,            // No operation
     OP_TRY_ENTER = 0x86,     // Apila desplazamiento u24 (A|B|C) del manejador atrapar/final (offset en seccion codigo)
-    OP_TRY_LEAVE = 0x87      // Saca un nivel de intentar (exito del bloque try)
+    OP_TRY_LEAVE = 0x87,     // Saca un nivel de intentar (exito del bloque try)
+    OP_LANZAR = 0x4C         // Lanza una excepcion (A=id_texto)
 } IROpcode;
 
 // Estructura para leer/escribir IR

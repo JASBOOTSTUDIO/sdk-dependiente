@@ -128,13 +128,23 @@
 #define OP_MEM_LISTA_AGREGAR 0xB1
 #define OP_MEM_LISTA_OBTENER 0xB2
 #define OP_MEM_LISTA_TAMANO  0xB3
-#define OP_MEM_MAPA_CREAR    0x61
-#define OP_MEM_MAPA_PONER    0x62
+#define OP_MEM_ULTIMA_PALABRA   0xD4
+#define OP_MEM_TERMINA_CON      0xD5
+#define OP_MEM_ULTIMA_SILABA    0xD6
+
+/* Búsqueda introspectiva */
+#define OP_MEM_BUSCAR_INTROSPECTIVA 0xCC
+#define OP_MEM_BUSCAR_INTROSPECTIVA_LISTA 0x09     /* A <- lista_id con IDs; B=termino_id, C=max_resultados */
+#define OP_MEM_BUSCAR_INTROSPECTIVA_CS 0x0A        /* A <- primer ID; B=termino_id, C=case_sensitive(0/1) */
+#define OP_MEM_BUSCAR_INTROSPECTIVA_DETALLADA 0x0B /* A <- lista_id con metadata; B=termino, C=max|(cs<<8) */
 #define OP_MEM_MAPA_OBTENER  0x63
 #define OP_MEM_MAPA_BORRAR   0xE3 /* A: map_id, B: key_id (penalizar se usa para borrar en mapas) */
 #define OP_MEM_MAPA_TAMANO   0x7E /* A <- numero de entradas (B: map_id reg) */
-#define OP_MEM_MAPA_CONTIENE 0x08 /* A <- 1 si clave C existe en mapa B, else 0 */
+#define OP_MEM_MAPA_LLAVES   0x0C /* A <- lista_id con llaves (B: map_id reg) */
+#define OP_MEM_MAPA_CONTIENE 0x0D /* A <- 1 si clave C existe en mapa B, else 0 */
 
+#define OP_MEM_MAPA_CREAR    0x61
+#define OP_MEM_MAPA_PONER    0x62
 #define OP_IR             0x40
 #define OP_SI             0x41
 #define OP_LLAMAR         0x42
@@ -173,6 +183,7 @@
 #define OP_IO_ENTRADA_FLOTANTE 0x8E
 #define OP_IO_PAUSA            0x26
 #define OP_PAUSA_MILISEGUNDOS  0x28
+#define OP_STR_FORMATEAR_TIMESTAMP 0x29
 #define OP_SYS_TIMESTAMP       0x57
 #define OP_FS_LEER_LINEA       0x58
 #define OP_FS_ESCRIBIR         0x53
@@ -200,6 +211,9 @@
 #define OP_SYS_ARGC            0x69
 #define OP_SYS_ARGV            0x6A
 #define OP_STR_DESDE_NUMERO    0x98
+#define OP_STR_DESDE_ANY       0x49
+#define OP_CONV_ANY2F          0x4A
+#define OP_CONV_ANY2I          0x4B
 #define OP_STR_FLOTANTE_PREC   0x8F
 #define OP_STR_CODIGO_CARACTER 0xEE
 #define OP_STR_DESDE_CODIGO    0x9A
@@ -208,6 +222,7 @@
 #define OP_STR_MINUSCULAS      0x50
 #define OP_STR_MAYUSCULAS      0x4F
 #define OP_MEM_LISTA_LIMPIAR   0xB6
+#define OP_MEM_LISTA_PONER     0xB7
 #define OP_MEM_LISTA_LIBERAR   0x8D
 #define OP_TCP_ENVIAR          0x19
 #define OP_TCP_RECIBIR         0x1A
@@ -224,6 +239,7 @@
 #define OP_JSON_LISTA_TAMANO   0x8C
 #define OP_TRY_ENTER           0x86
 #define OP_TRY_LEAVE           0x87
+#define OP_LANZAR              0x4C
 #define OP_MEM_LISTA_ID        0xB4
 #define OP_MEM_PENSAR_RESPUESTA 0xB5
 #define OP_LEER_U32_IND        0xEA

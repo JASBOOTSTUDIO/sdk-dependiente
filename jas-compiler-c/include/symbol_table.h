@@ -53,7 +53,8 @@ typedef struct StructMethodInfo {
 /* Definición de struct registrada (3.7) */
 typedef struct StructInfo {
     char *name;
-    char *base_name; /* NULL si no tiene base */
+    char **base_names; /* NULL si no tiene bases */
+    size_t n_bases;
     StructFieldInfo *fields;
     size_t n_fields;
     size_t total_size;
@@ -76,11 +77,16 @@ typedef struct SymbolTable {
 } SymbolTable;
 
 /* 3.1 Scopes anidados */
+void sym_init(SymbolTable *st);
+void sym_init_global(SymbolTable *st);
 void sym_enter_scope(SymbolTable *st, int is_function);
 int sym_exit_scope(SymbolTable *st);
 
-/* 3.2/3.3 Variables y parámetros (3.4 is_param en declare) */
-SymResult sym_declare(SymbolTable *st, const char *name, const char *type_name, size_t size, int is_param, int is_const, const char *lista_elem_type);
+/* 3.2/3.3 Variables y parámetros (3.4 is_param en declare)
+ * sym_flags: 0 = normal; SYMDECL_FLAGS_ALLOW_RESERVED_NAME solo para nombres inyectados por el compilador (resultado, este, padre). */
+#define SYMDECL_FLAGS_NONE                0
+#define SYMDECL_FLAGS_ALLOW_RESERVED_NAME 1
+SymResult sym_declare(SymbolTable *st, const char *name, const char *type_name, size_t size, int is_param, int is_const, const char *lista_elem_type, int sym_flags);
 SymResult sym_declare_macro(SymbolTable *st, const char *name, void *macro_ast);
 SymResult sym_reserve_temp(SymbolTable *st, size_t size);
 int sym_is_parameter(SymbolTable *st, const char *name);
@@ -101,10 +107,10 @@ void sym_register_class(SymbolTable *st, const char *name, const char **field_ty
                         void **method_asts, const char **method_names, const int *method_vis, size_t n_methods, int is_exported, int is_class);
 /* Herencia de datos: campos de base_name primero, luego los propios. base_name debe estar ya registrado.
  * Devuelve 0 si ok; -1 base inexistente; -2 campo duplicado con la base. */
-int sym_register_struct_extends(SymbolTable *st, const char *name, const char *base_name,
+int sym_register_struct_extends(SymbolTable *st, const char *name, const char **base_names, size_t n_bases,
                                 const char **field_types, const char **field_names, size_t n_fields);
 /* Versión extendida para herencia de clases */
-int sym_register_class_extends(SymbolTable *st, const char *name, const char *base_name,
+int sym_register_class_extends(SymbolTable *st, const char *name, const char **base_names, size_t n_bases,
                                const char **field_types, const char **field_names, const int *field_vis, size_t n_fields,
                                void **method_asts, const char **method_names, const int *method_vis, size_t n_methods, int is_exported, int is_class);
 int sym_get_struct_field(SymbolTable *st, const char *struct_name, const char *field_name, size_t *out_offset, const char **out_type, size_t *out_size);

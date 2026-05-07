@@ -53,16 +53,20 @@ const control = new Set([
   'intentar', 'atrapar', 'final', 'fin_intentar', 'lanzar',
   'registro', 'fin_registro', 'concepto', 'fin_concepto', 'macro', 'llamar', 'fin_archivo',
   'para_cada', 'fin_para_cada', 'sobre',
+  'para', 'cada', 'en', 'fin_para',
+  'clase', 'fin_clase', 'extiende', 'privado', 'padre',
+  'asincrono', 'esperar', 'tarea',
 ]);
 const storage = new Set([
   'entero', 'texto', 'flotante', 'caracter', 'constante', 'u32', 'u64', 'u8', 'byte',
-  'vec2', 'vec3', 'vec4', 'mat4', 'mat3', 'bool', 'lista', 'mapa',
+  'vec2', 'vec3', 'vec4', 'mat4', 'mat3', 'bool', 'lista', 'mapa', 'elemento', 'bytes', 'socket', 'tls',
+  'http_solicitud', 'http_respuesta', 'http_servidor', 'json', 'objeto',
 ]);
 const wordOp = new Set([
   'con', 'valor', 'peso', 'igual', 'es', 'entrada', 'entonces', 'retorna',
   'como', 'o', 'y', 'no', 'mayor', 'menor', 'distinto', 'que', 'de', 'a',
 ]);
-const imports = new Set(['usar', 'enviar', 'todo', 'todas']);
+const imports = new Set(['usar', 'enviar']);
 const constant = new Set(['verdadero', 'falso']);
 const io = new Set([
   'imprimir', 'imprimir_sin_salto', 'imprimir_texto', 'ingresar_texto',

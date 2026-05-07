@@ -28,7 +28,7 @@ static size_t type_size(SymbolTable *st, const char *type_name) {
     return 8;
 }
 
-static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs) {
+static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs, int report_errors) {
     if (!node || node->type != NODE_STRUCT_DEF) return;
     StructDefNode *sd = (StructDefNode *)node;
 
@@ -39,17 +39,20 @@ static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs)
         masts[j] = sd->methods[j];
     }
 
-    if (sd->extends_name && sd->extends_name[0]) {
-        int er = sym_register_class_extends(st, sd->name, sd->extends_name,
+    if (sd->n_extends > 0) {
+        int er = sym_register_class_extends(st, sd->name, (const char **)sd->extends_names, sd->n_extends,
             (const char **)sd->field_types, (const char **)sd->field_names, sd->field_visibilities, sd->n_fields,
             masts, mnames, sd->method_visibilities, sd->n_methods, sd->is_exported, sd->is_clase);
-        if (er == -1) {
-            fprintf(stderr, "Error semantico: la clase/registro '%s' extiende '%s', pero el tipo base no esta registrado.\n",
-                    sd->name ? sd->name : "?", sd->extends_name);
-            (*errs)++;
-        } else if (er == -2) {
-            fprintf(stderr, "Error semantico: la clase '%s' redefine el campo de '%s'.\n",
-                    sd->name ? sd->name : "?", sd->extends_name);
+        if (er != 0) {
+            if (report_errors) {
+                if (er == -1) {
+                    fprintf(stderr, "Error semantico: la clase/registro '%s' extiende una base no registrada.\n",
+                            sd->name ? sd->name : "?");
+                } else if (er == -2) {
+                    fprintf(stderr, "Error semantico: la clase '%s' redefine un campo de una de sus bases.\n",
+                            sd->name ? sd->name : "?");
+                }
+            }
             (*errs)++;
         }
     } else {
@@ -61,7 +64,7 @@ static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs)
     if (masts) free(masts);
 
     for (size_t i = 0; i < sd->n_nested_structs; i++) {
-        register_struct_recursive(st, sd->nested_structs[i], errs);
+        register_struct_recursive(st, sd->nested_structs[i], errs, report_errors);
     }
 }
 
@@ -73,11 +76,15 @@ static void resolve_struct_methods_recursive(SymbolTable *st, ASTNode *node) {
         FunctionNode *fn = (FunctionNode *)sd->methods[j];
         sym_enter_scope(st, 1);
         /* 'este' apunta a la instancia de la clase */
-        sym_declare(st, "este", sd->name, 8, 1, 0, NULL);
+        sym_declare(st, "este", sd->name, 8, 1, 0, NULL, SYMDECL_FLAGS_ALLOW_RESERVED_NAME);
+        if (sd->n_extends > 0) {
+            /* 'padre' apunta a la misma instancia pero con el tipo de la primera clase base */
+            sym_declare(st, "padre", sd->extends_names[0], 8, 1, 0, NULL, SYMDECL_FLAGS_ALLOW_RESERVED_NAME);
+        }
         for (size_t k = 0; k < fn->n_params; k++) {
             VarDeclNode *vd = (VarDeclNode *)fn->params[k];
             if (vd)
-                sym_declare(st, vd->name, vd->type_name, 8, 1, 0, vd->list_element_type);
+                sym_declare(st, vd->name, vd->type_name, 8, 1, 0, vd->list_element_type, SYMDECL_FLAGS_NONE);
         }
         resolve_block(fn->body, st);
         sym_exit_scope(st);
@@ -117,9 +124,38 @@ int resolve_program(ASTNode *ast, SymbolTable *st) {
         sym_register_struct(st, "mat4", m4_types, m4_fields, 16);
     }
 
-    /* Registrar structs (3.7) y clases con extiende */
-    for (size_t i = 0; i < p->n_globals; i++) {
-        register_struct_recursive(st, p->globals[i], &resolve_errs);
+    /* Registrar structs (3.7) y clases con extiende (Multi-pasada para herencia) */
+    int changed = 1;
+    int structs_left = 0;
+    while (changed) {
+        changed = 0;
+        structs_left = 0;
+        for (size_t i = 0; i < p->n_globals; i++) {
+            ASTNode *g = p->globals[i];
+            if (g && g->type == NODE_STRUCT_DEF) {
+                StructDefNode *sd = (StructDefNode*)g;
+                if (sym_get_struct_info(st, sd->name)) continue; // Ya registrado
+                
+                int local_errs = 0;
+                register_struct_recursive(st, g, &local_errs, 0);
+                if (local_errs == 0) {
+                    changed = 1;
+                } else {
+                    structs_left++;
+                }
+            }
+        }
+    }
+    if (structs_left > 0) {
+        /* Intento final para reportar errores reales de base faltante */
+        for (size_t i = 0; i < p->n_globals; i++) {
+            if (p->globals[i] && p->globals[i]->type == NODE_STRUCT_DEF) {
+                StructDefNode *sd = (StructDefNode*)p->globals[i];
+                if (!sym_get_struct_info(st, sd->name)) {
+                    register_struct_recursive(st, p->globals[i], &resolve_errs, 1);
+                }
+            }
+        }
     }
 
     /* Variables globales (VarDecl en globals) */
@@ -128,7 +164,7 @@ int resolve_program(ASTNode *ast, SymbolTable *st) {
         if (g && g->type == NODE_VAR_DECL) {
             VarDeclNode *vd = (VarDeclNode *)g;
             size_t sz = type_size(st, vd->type_name);
-            sym_declare(st, vd->name, vd->type_name, sz, 0, vd->is_const ? 1 : 0, vd->list_element_type);
+            sym_declare(st, vd->name, vd->type_name, sz, 0, vd->is_const ? 1 : 0, vd->list_element_type, SYMDECL_FLAGS_NONE);
         }
     }
 
@@ -146,7 +182,7 @@ int resolve_program(ASTNode *ast, SymbolTable *st) {
         for (size_t j = 0; j < fn->n_params; j++) {
             VarDeclNode *vd = (VarDeclNode *)fn->params[j];
             if (vd)
-                sym_declare(st, vd->name, vd->type_name, 8, 1, 0, vd->list_element_type);
+                sym_declare(st, vd->name, vd->type_name, 8, 1, 0, vd->list_element_type, SYMDECL_FLAGS_NONE);
         }
         resolve_block(fn->body, st);
         int func_unused = sym_exit_scope(st);
@@ -173,7 +209,7 @@ static void resolve_statement(ASTNode *node, SymbolTable *st) {
         case NODE_INPUT: {
             InputNode *in = (InputNode *)node;
             if (in->variable)
-                sym_declare(st, in->variable, "texto", 8, 0, 0, NULL);
+                sym_declare(st, in->variable, "texto", 8, 0, 0, NULL, SYMDECL_FLAGS_NONE);
             break;
         }
         case NODE_VAR_DECL: {
@@ -182,7 +218,7 @@ static void resolve_statement(ASTNode *node, SymbolTable *st) {
                 sym_declare_macro(st, vd->name, vd->value);
             } else {
                 size_t sz = type_size(st, vd->type_name);
-                sym_declare(st, vd->name, vd->type_name, sz, 0, vd->is_const ? 1 : 0, vd->list_element_type);
+                sym_declare(st, vd->name, vd->type_name, sz, 0, vd->is_const ? 1 : 0, vd->list_element_type, SYMDECL_FLAGS_NONE);
             }
             break;
         }
@@ -190,7 +226,7 @@ static void resolve_statement(ASTNode *node, SymbolTable *st) {
             ForEachNode *fe = (ForEachNode *)node;
             sym_enter_scope(st, 0);
             if (fe->iter_name && fe->iter_type)
-                sym_declare(st, fe->iter_name, fe->iter_type, 8, 0, 0, NULL);
+                sym_declare(st, fe->iter_name, fe->iter_type, 8, 0, 0, NULL, SYMDECL_FLAGS_NONE);
             resolve_block(fe->body, st);
             sym_exit_scope(st);
             break;

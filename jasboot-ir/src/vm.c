@@ -4,6 +4,7 @@
 
 #include "vm.h"
 #include "reader_ir.h"
+#include "memoria_neuronal/memoria_neuronal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -564,6 +565,8 @@ static void vm_elegir_por_peso_best(VM* vm, uint32_t ctx, uint32_t list_id,
 }
 #endif
 
+static int vm_text_cache_put(VM* vm, uint32_t id, const char* text);
+
 static void vm_text_cache_free(VM* vm) {
     if (!vm || !vm->text_cache_buckets) return;
     for (size_t i = 0; i < vm->text_cache_size; i++) {
@@ -863,7 +866,20 @@ static int vm_text_resolve_info(VM* vm, uint32_t id, char* scratch, size_t scrat
 
 static const char* vm_text_cache_get(VM* vm, uint32_t id) {
     VMTextCacheEntry* e = vm_text_cache_find(vm, id);
-    if (!e) return NULL;
+    if (!e) {
+#ifdef JASBOOT_LANG_INTEGRATION
+        /* Si no esta en cache, podria ser un texto de la JMN */
+        if (vm->mem_neuronal) {
+            char jmn_scratch[1024];
+            if (jmn_obtener_texto(vm->mem_neuronal, id, jmn_scratch, sizeof(jmn_scratch)) >= 0) {
+                /* Lo agregamos a la cache para que tenga su propia memoria persistente en esta sesion */
+                vm_text_cache_put(vm, id, jmn_scratch);
+                return vm_text_cache_get(vm, id);
+            }
+        }
+#endif
+        return NULL;
+    }
     if (e->kind == VM_TEXT_RAW) return e->text;
     if (e->kind == VM_TEXT_CONCAT && !e->text) {
         char* flat = (char*)malloc(e->text_len + 1);
@@ -1246,6 +1262,7 @@ VM* vm_create(void) {
     vm->fp_stack_ptr = 0;
     vm->fp = 0x4000; // Stack starts at 16KB (globals at 2KB)
     vm->sp = 0x4000;
+    vm->heap_top = 0x20000; // Heap allocation starts at 128KB
     vm->pc = 0;
     vm->running = 0;
     vm->exit_code = 0;
@@ -1384,6 +1401,80 @@ static void vm_escribir_flotante(uint64_t valor) {
     fflush(stdout);
 }
 
+#ifdef JASBOOT_LANG_INTEGRATION
+static void vm_imprimir_valor_recursivo(VM* vm, JMNValor val, int depth) {
+    if (depth > 10) {
+        vm_escribir_cadena("...");
+        return;
+    }
+
+    uint32_t id = val.u;
+    
+    // 1. Intentar texto (cache)
+    const char* v_txt = id ? vm_text_cache_get(vm, id) : NULL;
+    if (v_txt) {
+        vm_escribir_cadena("\"");
+        vm_escribir_cadena(v_txt);
+        vm_escribir_cadena("\"");
+        return;
+    }
+
+    JMNMemoria* m_col = vm->mem_colecciones;
+    JMNMemoria* m_neu = vm->mem_neuronal;
+
+    // 2. Intentar colecciones (listas/mapas) - Solo si el ID es grande (heurística para evitar booleanos/enteros pequeños)
+    if (id > 100000 && m_col && (jmn_lista_existe(m_col, id) || jmn_mapa_existe(m_col, id))) {
+        int es_mapa = jmn_mapa_existe(m_col, id);
+        vm_escribir_cadena(es_mapa ? "{" : "[");
+        if (es_mapa) {
+            uint32_t tam = jmn_mapa_tamano(m_col, id);
+            for (uint32_t j = 0; j < tam; j++) {
+                if (j > 0) vm_escribir_cadena(", ");
+                uint32_t kid = jmn_mapa_obtener_llave(m_col, id, j);
+                JMNValor sub_val = jmn_mapa_obtener_valor_por_indice(m_col, id, j);
+                
+                const char* k_txt = vm_text_cache_get(vm, kid);
+                if (k_txt) { vm_escribir_cadena("\""); vm_escribir_cadena(k_txt); vm_escribir_cadena("\""); }
+                else { char b[32]; snprintf(b, sizeof(b), "%u", kid); vm_escribir_cadena(b); }
+                
+                vm_escribir_cadena(": ");
+                vm_imprimir_valor_recursivo(vm, sub_val, depth + 1);
+            }
+        } else {
+            uint32_t tam = jmn_lista_tamano(m_col, id);
+            for (uint32_t i = 0; i < tam; i++) {
+                if (i > 0) vm_escribir_cadena(", ");
+                JMNValor sub_v = jmn_lista_obtener(m_col, id, i);
+                vm_imprimir_valor_recursivo(vm, sub_v, depth + 1);
+                if (i >= 50) { vm_escribir_cadena(", ..."); break; }
+            }
+        }
+        vm_escribir_cadena(es_mapa ? "}" : "]");
+        return;
+    }
+
+    // 3. Intentar texto en JMN neuronal
+    if (m_neu && id != 0) {
+        char buf_txt[512];
+        if (jmn_obtener_texto(m_neu, id, buf_txt, sizeof(buf_txt)) >= 0 && buf_txt[0]) {
+            vm_text_cache_put(vm, id, buf_txt);
+            vm_escribir_cadena("\"");
+            vm_escribir_cadena(buf_txt);
+            vm_escribir_cadena("\"");
+            return;
+        }
+    }
+
+    // 4. Heurística de flotante vs entero
+    uint32_t exp = (id >> 23) & 0xFF;
+    if (id > 1000000 && exp > 0x30 && exp < 0xA0) {
+        vm_escribir_flotante((uint64_t)id);
+    } else {
+        vm_escribir_entero((uint64_t)id);
+    }
+}
+#endif
+
 /* Copia src a dst (hasta dstsz-1) sin espacio inicial ni final. */
 static void vm_str_trim_copia(const char *src, char *dst, size_t dstsz) {
     size_t n;
@@ -1440,17 +1531,56 @@ static float vm_parse_decimal_flotante_estricto(const char *s) {
     return (float)d;
 }
 
+static int vm_range_check(size_t size, uint64_t addr, size_t need, size_t* out_addr) {
+    if (need == 0 || need > size) return 0;
+    if (addr > (uint64_t)size) return 0;
+    if (((uint64_t)size - addr) < (uint64_t)need) return 0;
+    if (out_addr) *out_addr = (size_t)addr;
+    return 1;
+}
+
+static int vm_addr_add_u32(uint64_t base, uint32_t delta, uint64_t* out) {
+    if (!out) return 0;
+    if (base > UINT64_MAX - (uint64_t)delta) return 0;
+    *out = base + (uint64_t)delta;
+    return 1;
+}
+
+static int vm_mem_read_u64_checked(const VM* vm, uint64_t addr, uint64_t* out) {
+    size_t off = 0;
+    if (!vm || !vm->memory || !out) return 0;
+    if (!vm_range_check(vm->memory_size, addr, sizeof(uint64_t), &off)) return 0;
+    memcpy(out, vm->memory + off, sizeof(uint64_t));
+    return 1;
+}
+
+static int vm_mem_write_u64_checked(VM* vm, uint64_t addr, uint64_t value) {
+    size_t off = 0;
+    if (!vm || !vm->memory) return 0;
+    if (!vm_range_check(vm->memory_size, addr, sizeof(uint64_t), &off)) return 0;
+    memcpy(vm->memory + off, &value, sizeof(uint64_t));
+    return 1;
+}
+
+static int vm_mem_read_u32_checked(const VM* vm, uint64_t addr, uint32_t* out) {
+    size_t off = 0;
+    if (!vm || !vm->memory || !out) return 0;
+    if (!vm_range_check(vm->memory_size, addr, sizeof(uint32_t), &off)) return 0;
+    memcpy(out, vm->memory + off, sizeof(uint32_t));
+    return 1;
+}
+
 /* Leer/escribir float desde memoria (8 bytes por float, bits en low 32 del uint64) */
 static float vm_mem_read_float(const VM* vm, size_t addr) {
-    if (addr + 8 > vm->memory_size) return 0.0f;
-    uint64_t u = *(uint64_t*)(vm->memory + addr);
-    union { uint64_t u64; float f32; } uf = { .u64 = (uint32_t)(u & 0xFFFFFFFF) };
+    uint64_t u = 0;
+    union { uint64_t u64; float f32; } uf;
+    if (!vm_mem_read_u64_checked(vm, (uint64_t)addr, &u)) return 0.0f;
+    uf.u64 = (uint32_t)(u & 0xFFFFFFFFu);
     return uf.f32;
 }
 static void vm_mem_write_float(VM* vm, size_t addr, float f) {
-    if (addr + 8 > vm->memory_size) return;
     union { uint64_t u64; float f32; } uf = { .f32 = f };
-    *(uint64_t*)(vm->memory + addr) = uf.u64;
+    (void)vm_mem_write_u64_checked(vm, (uint64_t)addr, uf.u64);
 }
 
 static void vm_free_cached_tls_server_ctx(VM* vm);
@@ -1458,6 +1588,56 @@ static void vm_free_cached_tls_server_ctx(VM* vm);
 static uint32_t vm_call_depth(VM* vm) {
     if (!vm) return 0;
     return (uint32_t)vm->stack_ptr;
+}
+
+static int vm_ensure_stack_space(VM* vm, uint32_t bytes_to_alloc, const char* context) {
+    const size_t VM_MEMORY_HARD_LIMIT = 256u * 1024u * 1024u; /* 256 MB */
+    if (!vm) return 0;
+    if (bytes_to_alloc == 0) return 1;
+
+    uint64_t required64 = (uint64_t)vm->sp + (uint64_t)bytes_to_alloc;
+    if (required64 <= (uint64_t)vm->memory_size) return 1;
+    if (required64 > (uint64_t)SIZE_MAX || required64 > (uint64_t)VM_MEMORY_HARD_LIMIT) {
+        fprintf(stderr,
+                "[VM ERR] %s: stack requerido=%llu bytes (SP=%u,+%u), limite duro=%zu.\n",
+                context ? context : "OP_RESERVAR_PILA",
+                (unsigned long long)required64,
+                (unsigned)vm->sp,
+                (unsigned)bytes_to_alloc,
+                VM_MEMORY_HARD_LIMIT);
+        return 0;
+    }
+
+    size_t required = (size_t)required64;
+    size_t new_size = vm->memory_size ? vm->memory_size : (1024u * 1024u);
+    while (new_size < required) {
+        size_t grown = new_size * 2u;
+        if (grown <= new_size) {
+            new_size = required;
+            break;
+        }
+        if (grown > VM_MEMORY_HARD_LIMIT) {
+            new_size = VM_MEMORY_HARD_LIMIT;
+            break;
+        }
+        new_size = grown;
+    }
+    if (new_size < required) return 0;
+
+    uint8_t* new_memory = (uint8_t*)realloc(vm->memory, new_size);
+    if (!new_memory) {
+        fprintf(stderr,
+                "[VM ERR] %s: fallo realloc al ampliar memoria a %zu bytes (actual=%zu).\n",
+                context ? context : "OP_RESERVAR_PILA",
+                new_size,
+                vm->memory_size);
+        return 0;
+    }
+
+    memset(new_memory + vm->memory_size, 0, new_size - vm->memory_size);
+    vm->memory = new_memory;
+    vm->memory_size = new_size;
+    return 1;
 }
 
 static void vm_format_source_path(VM* vm, char* out, size_t out_size) {
@@ -1566,7 +1746,7 @@ void vm_destroy(VM* vm) {
 }
 
 static int vm_leer_u32(const uint8_t* data, size_t size, size_t offset, uint32_t* out) {
-    if (!data || !out || offset + sizeof(uint32_t) > size) return -1;
+    if (!data || !out || offset > size || size - offset < sizeof(uint32_t)) return -1;
     const uint8_t* p = data + offset;
     *out = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
     return 0;
@@ -2942,24 +3122,107 @@ static int vm_error_memoria_sin_cerrar(VM* vm) {
 #endif
 }
 
+/* Función unificada para lectura segura de memoria */
+static int vm_leer_seguro(VM* vm, uint64_t addr, uint64_t* out_value, const char* context) {
+    // Validación segura sin overflow aritmético
+    if (addr > vm->memory_size || vm->memory_size - addr < 8) {
+        char trymsg[512];
+        uint32_t hash_id = (uint32_t)addr;
+        
+        // Diagnóstico mejorado y uniforme
+        if (addr < 1024) {
+            snprintf(trymsg, sizeof trymsg, 
+                "[ERROR VM] Violacion de acceso en OP_LEER%s: Intento de leer desde una direccion cercana a NULO (0x%08llX). PC=0x%08llX. Probablemente accediendo a campo de objeto no inicializado.", 
+                context, (unsigned long long)addr, (unsigned long long)vm->pc);
+        } else {
+            const char* txt = vm_text_cache_get(vm, hash_id);
+            if (!txt) txt = vm_text_cache_get(vm, hash_id & ~0x80000000u);
+            
+            if (txt) {
+                snprintf(trymsg, sizeof trymsg, 
+                    "[ERROR VM] Corrupcion de contexto%s: Se intento usar texto '%s' (hash 0x%08X) como direccion de memoria en OP_LEER. PC=0x%08llX. Esto ocurre al acceder a miembro de algo que no es objeto.", 
+                    context, txt, hash_id, (unsigned long long)vm->pc);
+            } else {
+                snprintf(trymsg, sizeof trymsg, 
+                    "[ERROR VM] Violacion de acceso en OP_LEER%s: direccion 0x%08llX fuera de limites (0-%zu). PC=0x%08llX.", 
+                    context, (unsigned long long)addr, vm->memory_size, (unsigned long long)vm->pc);
+            }
+        }
+        
+        // Integración con try/catch
+        if (vm_try_catch_or_abort(vm, trymsg)) return 0;
+        
+        fprintf(stderr, "%s\n", trymsg);
+        vm->running = 0;
+        vm->exit_code = 1;
+        return 0;
+    }
+    
+    // Lectura segura con memcpy
+    memcpy(out_value, vm->memory + addr, 8);
+    return 1;
+}
+
+/* Función unificada para escritura segura de memoria */
+static int vm_escribir_seguro(VM* vm, uint64_t addr, uint64_t value, const char* context) {
+    // Validación segura sin overflow aritmético
+    if (addr > vm->memory_size || vm->memory_size - addr < 8) {
+        char trymsg[512];
+        uint32_t hash_id = (uint32_t)addr;
+        
+        // Diagnóstico mejorado y uniforme
+        if (addr < 1024) {
+            snprintf(trymsg, sizeof trymsg, 
+                "[ERROR VM] Violacion de acceso en OP_ESCRIBIR%s: Intento de escribir en direccion cercana a NULO (0x%08llX). PC=0x%08llX. Probablemente asignando campo a objeto no inicializado.", 
+                context, (unsigned long long)addr, (unsigned long long)vm->pc);
+        } else {
+            const char* txt = vm_text_cache_get(vm, hash_id);
+            if (!txt) txt = vm_text_cache_get(vm, hash_id & ~0x80000000u);
+            
+            if (txt) {
+                snprintf(trymsg, sizeof trymsg, 
+                    "[ERROR VM] Corrupcion de contexto%s: Se intento usar texto '%s' (hash 0x%08X) como direccion de memoria en OP_ESCRIBIR. PC=0x%08llX. Esto ocurre al asignar miembro a algo que no es objeto.", 
+                    context, txt, hash_id, (unsigned long long)vm->pc);
+            } else {
+                snprintf(trymsg, sizeof trymsg, 
+                    "[ERROR VM] Violacion de acceso en OP_ESCRIBIR%s: direccion 0x%08llX fuera de limites (0-%zu). PC=0x%08llX.", 
+                    context, (unsigned long long)addr, vm->memory_size, (unsigned long long)vm->pc);
+            }
+        }
+        
+        // Integración con try/catch
+        if (vm_try_catch_or_abort(vm, trymsg)) return 0;
+        
+        fprintf(stderr, "%s\n", trymsg);
+        vm->running = 0;
+        vm->exit_code = 1;
+        return 0;
+    }
+    
+    // Escritura segura con memcpy
+    memcpy(vm->memory + addr, &value, 8);
+    return 1;
+}
+
 int vm_step(VM* vm) {
-    if (!vm || !vm->ir || !vm->running) return -1;
+    if (!vm || !vm->ir) return -1;
+    /* No usar -1 aqui si !running: el bucle rapido llama vm_step en default y trataba -1 como error fatal. */
+    if (!vm->running) return 0;
     
     // Verificar si estamos fuera de código
     size_t code_start = vm_code_start(vm->ir);
-    
-    if (vm->pc < code_start || vm->pc >= code_start + vm->ir->header.code_size) {
+    /* Solo ejecutar bytes que forman instrucciones completas: si header.code_size % 5 != 0,
+     * code_count (floor) * 5 es el limite real; evita inst_index == code_count y return -1
+     * al terminar la ultima instruccion (salida silenciosa con codigo 1). */
+    size_t code_exec_end = vm->ir->code_count * IR_INSTRUCTION_SIZE;
+    if (vm->pc < code_start || vm->pc >= code_start + code_exec_end) {
         vm->running = 0;
         return 0;  // Fin de ejecución
     }
-    
+
     // Obtener instrucción
     IRInstruction inst;
     size_t inst_index = (vm->pc - code_start) / IR_INSTRUCTION_SIZE;
-    if (inst_index >= vm->ir->code_count) {
-        vm->running = 0;
-        return -1;
-    }
     const uint8_t* code_ptr = vm->ir->code + (inst_index * IR_INSTRUCTION_SIZE);
     inst.opcode = code_ptr[0];
     inst.flags = code_ptr[1];
@@ -2989,7 +3252,7 @@ int vm_step(VM* vm) {
         }
 
         case OP_MOVER_U24: {
-            uint32_t val = (uint32_t)inst.operand_b | ((uint32_t)inst.operand_c << 8) | ((uint32_t)inst.flags << 16);
+            uint32_t val = (uint32_t)inst.operand_b | ((uint32_t)inst.operand_c << 8) | (((uint32_t)inst.flags) << 16);
             vm_set_register(vm, inst.operand_a, (uint64_t)val);
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
@@ -3008,13 +3271,18 @@ int vm_step(VM* vm) {
             
             // Direccionamiento relativo al Frame Pointer (Sovereign Recursion)
             if (inst.flags & IR_INST_FLAG_RELATIVE) {
-                addr += vm->fp;
+                if (!vm_addr_add_u32(addr, vm->fp, &addr)) {
+                    addr = UINT64_MAX;
+                }
             }
             
-            if (addr + 8 <= vm->memory_size) {
-                uint64_t value = *(uint64_t*)(vm->memory + addr);
-                vm_set_register(vm, inst.operand_a, value);
+            // Lectura segura unificada
+            uint64_t value = 0;
+            if (!vm_leer_seguro(vm, addr, &value, " (vm_step)")) {
+                return 0; // Error ya manejado por vm_leer_seguro
             }
+            vm_set_register(vm, inst.operand_a, value);
+            
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
@@ -3038,12 +3306,16 @@ int vm_step(VM* vm) {
             
             // Direccionamiento relativo al Frame Pointer
             if (inst.flags & IR_INST_FLAG_RELATIVE) {
-                addr += vm->fp;
+                if (!vm_addr_add_u32(addr, vm->fp, &addr)) {
+                    addr = UINT64_MAX;
+                }
             }
             
-            if (addr + 8 <= vm->memory_size) {
-                 *(uint64_t*)(vm->memory + addr) = b_val;
+            // Escritura segura unificada
+            if (!vm_escribir_seguro(vm, addr, b_val, " (vm_step)")) {
+                return 0; // Error ya manejado por vm_escribir_seguro
             }
+            
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
@@ -3394,23 +3666,10 @@ int vm_step(VM* vm) {
             }
             
             if (!encontrado) {
-                char trymsg[288];
-                snprintf(trymsg, sizeof trymsg,
-                         "clave de mapa inexistente: no hay valor para la clave %u en el mapa %u.",
-                         (unsigned)map_key, (unsigned)map_id);
-                if (vm_try_catch_or_abort(vm, trymsg))
-                    return 0;
-                if (vm->current_line > 0)
-                    fprintf(stderr,
-                            "Error de ejecucion (VM) en la linea %d: %s\n",
-                            vm->current_line, trymsg);
-                else
-                    fprintf(stderr, "Error de ejecucion (VM): %s\n", trymsg);
-                vm->running = 0;
-                vm->exit_code = 1;
-                return 0;
+                vm_set_register(vm, inst.operand_a, 0); /* Return nulo (0) */
+            } else {
+                vm_set_register(vm, inst.operand_a, (uint64_t)val.u);
             }
-            vm_set_register(vm, inst.operand_a, (uint64_t)val.u);
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
 #endif
@@ -3430,6 +3689,33 @@ int vm_step(VM* vm) {
                 tam = jmn_mapa_tamano(m_target, map_id_val);
 #endif
             vm_set_register(vm, inst.operand_a, (uint64_t)tam);
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+
+        case OP_MEM_MAPA_LLAVES: {
+            uint32_t map_id = (uint32_t)b_val;
+            uint32_t list_id = (uint32_t)0;
+#ifdef JASBOOT_LANG_INTEGRATION
+            JMNMemoria* m_target = (vm->mem_neuronal && jmn_mapa_existe(vm->mem_neuronal, map_id))
+                                   ? vm->mem_neuronal : vm->mem_colecciones;
+            if (!m_target) { ensure_jmn_col(vm); m_target = vm->mem_colecciones; }
+            if (m_target) {
+                ensure_jmn_col(vm);
+                list_id = vm_alloc_runtime_text_id(vm) | 0x80000000;
+                jmn_crear_lista(vm->mem_colecciones, list_id);
+                
+                uint32_t tam = jmn_mapa_tamano(m_target, map_id);
+                for (uint32_t i = 0; i < tam; i++) {
+                    uint32_t kid = jmn_mapa_obtener_llave(m_target, map_id, i);
+                    if (kid != 0) {
+                        JMNValor v; v.u = kid;
+                        jmn_lista_agregar(vm->mem_colecciones, list_id, v);
+                    }
+                }
+            }
+#endif
+            vm_set_register(vm, inst.operand_a, (uint64_t)list_id);
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
@@ -3501,7 +3787,14 @@ int vm_step(VM* vm) {
                 if (inst.flags & IR_INST_FLAG_B_IMMEDIATE) {
                     uint32_t target = (uint32_t)inst.operand_b;
                     if (inst.flags & IR_INST_FLAG_C_IMMEDIATE) target |= ((uint32_t)inst.operand_c << 8);
-                    size_t next_pc = (inst.flags & IR_INST_FLAG_RELATIVE) ? (vm->pc + (size_t)target) : (code_start + (size_t)target);
+                    size_t next_pc;
+                    if (inst.flags & IR_INST_FLAG_RELATIVE) {
+                        /* Desplazamiento firmado 16 bits desde el fin de esta instruccion (PATCH_SI; ver resolve_patches). */
+                        int32_t rel = (int16_t)(target & 0xFFFFu);
+                        next_pc = (size_t)((int64_t)vm->pc + (int64_t)IR_INSTRUCTION_SIZE + (int64_t)rel);
+                    } else {
+                        next_pc = code_start + (size_t)target;
+                    }
                     vm->pc = next_pc;
                 } else {
                     size_t next_pc = (inst.flags & IR_INST_FLAG_RELATIVE) ? (vm->pc + (size_t)b_val) : (code_start + (size_t)b_val);
@@ -3558,9 +3851,6 @@ int vm_step(VM* vm) {
         }
             
         case OP_RETORNAR: {
-            if (vm->mem_neuronal && vm_error_memoria_sin_cerrar(vm)) {
-                return 0;
-            }
             if (vm->stack_ptr == 0 || vm->fp_stack_ptr == 0) {
                 vm->running = 0;
                 vm->exit_code = (int)a_val;
@@ -3580,9 +3870,14 @@ int vm_step(VM* vm) {
             uint32_t bytes_to_alloc = (uint32_t)inst.operand_a 
                                     | ((uint32_t)inst.operand_b << 8) 
                                     | ((uint32_t)inst.operand_c << 16);
+            /* Salvaguarda: evitar crecimiento acumulativo si se re-ejecuta el prólogo del mismo frame. */
+            if (vm->sp > vm->fp) {
+                vm->pc += IR_INSTRUCTION_SIZE;
+                break;
+            }
             // printf("[VM DBG] RESERVAR_PILA: %u bytes\n", bytes_to_alloc);
-            if (vm->sp + bytes_to_alloc > vm->memory_size) {
-                 const char *ms = "[VM ERR] Memory Stack Exhausted";
+            if (!vm_ensure_stack_space(vm, bytes_to_alloc, "OP_RESERVAR_PILA")) {
+                 const char *ms = "[VM ERR] Memory Stack Exhausted (sin crecimiento posible)";
                  if (vm_try_catch_or_abort(vm, ms)) return 0;
                  fprintf(stderr, "%s\n", ms);
                  vm->running = 0;
@@ -3601,17 +3896,16 @@ int vm_step(VM* vm) {
             if ((inst.flags & IR_INST_FLAG_B_IMMEDIATE) && (inst.flags & IR_INST_FLAG_C_IMMEDIATE))
                 bytes |= (uint64_t)inst.operand_c << 8;
             
-            /* Allocate from 2MB mark in vm->memory */
-            static uint32_t heap_top = 0x200000;
-            if (vm->pc == 0) heap_top = 0x200000;
-            
-            uint32_t addr = heap_top;
+            uint32_t addr = vm->heap_top;
             if (addr + bytes <= vm->memory_size) {
                 memset(vm->memory + addr, 0, (size_t)bytes);
+                vm->heap_top += (uint32_t)bytes;
+                vm->heap_top = (vm->heap_top + 7) & ~7; /* Align */
+            } else {
+                /* Error: heap overflow or memory size too small */
+                fprintf(stderr, "[ERROR VM] Heap overflow o memoria insuficiente para reserva de %llu bytes en 0x%08x (limite %zu)\n", (unsigned long long)bytes, addr, vm->memory_size);
+                addr = 0;
             }
-            
-            heap_top += (uint32_t)bytes;
-            heap_top = (heap_top + 7) & ~7; /* Align */
             
             vm_set_register(vm, inst.operand_a, (uint64_t)addr);
             vm->pc += IR_INSTRUCTION_SIZE;
@@ -3764,7 +4058,9 @@ int vm_step(VM* vm) {
             fflush(stdout);
             if (fgets(buffer, sizeof(buffer), stdin)) {
                 size_t len = strlen(buffer);
-                if (len > 0 && buffer[len - 1] == '\n') buffer[len - 1] = '\0';
+                while (len > 0 && (buffer[len - 1] == '\n' || buffer[len - 1] == '\r')) {
+                    buffer[--len] = '\0';
+                }
                 uint32_t new_id = 0;
                 int is_numeric = 1;
                 char* endptr;
@@ -3800,11 +4096,14 @@ int vm_step(VM* vm) {
 
         case OP_ID_A_TEXTO: {
             uint32_t id = (uint32_t)vm_get_register(vm, inst.operand_b);
-            if (vm->mem_neuronal) {
-                char buf[1024];
-                if (jmn_obtener_texto(vm->mem_neuronal, id, buf, sizeof(buf)) >= 0 && buf[0]) {
-                    uint32_t tid = vm_alloc_runtime_text_id(vm);
-                    vm_text_cache_put_owned(vm, tid, strdup(buf), strlen(buf));
+            /* Misma resolución que buscar/imprimir: texto puede estar solo en caché VM
+             * (p. ej. literal reciente) sin fila JMN; jmn_obtener_texto solo fallaba y dejaba el id crudo. */
+            char buf[1024];
+            if (vm_text_cache_get_copy(vm, id, buf, sizeof(buf)) && buf[0]) {
+                uint32_t tid = vm_alloc_runtime_text_id(vm);
+                char* owned = strdup(buf);
+                if (owned) {
+                    vm_text_cache_put_owned(vm, tid, owned, strlen(owned));
                     vm_set_register(vm, inst.operand_a, (uint64_t)tid);
                 } else {
                     vm_set_register(vm, inst.operand_a, (uint64_t)id);
@@ -3827,6 +4126,38 @@ int vm_step(VM* vm) {
             union { uint64_t u64; float f32; } cast = {0};
             cast.u64 = (uint32_t)(b_val & 0xFFFFFFFF);
             vm_set_register(vm, inst.operand_a, (uint64_t)cast.f32);
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+        case OP_CONV_ANY2F: {
+            uint32_t u32 = (uint32_t)(b_val & 0xFFFFFFFF);
+            int is_float = 0;
+            if ((u32 >= 0x38000000 && u32 <= 0x50000000) || (u32 >= 0xB8000000 && u32 <= 0xD0000000)) {
+                is_float = 1;
+            }
+            if (is_float) {
+                vm_set_register(vm, inst.operand_a, b_val);
+            } else {
+                union { uint64_t u64; float f32; } cast = {0};
+                cast.f32 = (float)b_val;
+                vm_set_register(vm, inst.operand_a, cast.u64);
+            }
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+        case OP_CONV_ANY2I: {
+            uint32_t u32 = (uint32_t)(b_val & 0xFFFFFFFF);
+            int is_float = 0;
+            if ((u32 >= 0x38000000 && u32 <= 0x50000000) || (u32 >= 0xB8000000 && u32 <= 0xD0000000)) {
+                is_float = 1;
+            }
+            if (is_float) {
+                union { uint64_t u64; float f32; } cast = {0};
+                cast.u64 = u32;
+                vm_set_register(vm, inst.operand_a, (uint64_t)((long int)cast.f32));
+            } else {
+                vm_set_register(vm, inst.operand_a, b_val);
+            }
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
@@ -4068,10 +4399,10 @@ int vm_step(VM* vm) {
                          }
                      }
 #endif
-                     if (dest_addr + sizeof(uint64_t) <= vm->memory_size) *(uint64_t*)(vm->memory + dest_addr) = (uint64_t)new_id;
+                     (void)vm_mem_write_u64_checked(vm, dest_addr, (uint64_t)new_id);
                  } else {
-                     if (vm->modo_continuo && dest_addr + sizeof(uint64_t) <= vm->memory_size)
-                         *(uint64_t*)(vm->memory + dest_addr) = 5381; /* "" */
+                     if (vm->modo_continuo)
+                         (void)vm_mem_write_u64_checked(vm, dest_addr, 5381); /* "" */
                      else if (!vm->modo_continuo)
                          vm->running = 0;
                  }
@@ -4348,213 +4679,13 @@ int vm_step(VM* vm) {
         
         case OP_MEM_IMPRIMIR_ID: {
             uint32_t id = (uint32_t)vm_get_register(vm, inst.operand_a);
-            int impreso = 0;
-
 #ifdef JASBOOT_LANG_INTEGRATION
-            // 0. Prioridad: cache y JMN texto (evitar {3:1} cuando el texto sí existe)
-            const char* cached_name = vm_text_cache_get(vm, id);
-            if (cached_name && cached_name[0]) {
-                vm_escribir_cadena(cached_name);
-                impreso = 1;
-            }
-            if (!impreso && vm->mem_neuronal && id != 0) {
-                char buf_txt[512];
-                if (jmn_obtener_texto(vm->mem_neuronal, id, buf_txt, sizeof(buf_txt)) >= 0 && buf_txt[0]) {
-                    vm_text_cache_put(vm, id, buf_txt);
-                    vm_escribir_cadena(buf_txt);
-                    impreso = 1;
-                }
-            }
-            if (impreso) {
-                vm->pc += IR_INSTRUCTION_SIZE;
-                break;
-            }
-
-            // 1. Intentar colecciones (listas/mapas/vectores)
-            JMNMemoria* m_col = vm->mem_colecciones;
-            JMNMemoria* m_neu = vm->mem_neuronal;
-            
-            JMNMemoria* memorias[] = { m_col, m_neu };
-            for (int m = 0; m < 2; m++) {
-                if (impreso || !memorias[m]) continue;
-                
-                uint32_t tam = jmn_lista_tamano(memorias[m], id);
-                JMNNodo* nodo = jmn_obtener_nodo(memorias[m], id);
-                
-                if (tam > 0 || nodo) {
-                    /* Prioridad: mostrar texto del concepto, nunca el mapa interno {1: 1} */
-                    int imprimir_brackets = 1;
-                    int es_mapa = 0;
-                    uint32_t c_count = 0;
-                    JMNConexion* conexiones = jmn_obtener_conexiones(memorias[m], nodo, &c_count);
-                    if (conexiones && c_count > 0) {
-                        for (uint32_t j = 0; j < c_count; j++) {
-                            uint32_t kid = conexiones[j].key_id;
-                            if (kid != 0 && (kid < 0x10000000 || kid > 0x1000FFFF)) {
-                                es_mapa = 1;
-                                break;
-                            }
-                        }
-                    }
-                    if (cached_name && cached_name[0]) {
-                        vm_escribir_cadena(cached_name);
-                        impreso = 1;
-                        imprimir_brackets = 0;
-                    } else if (m == 1 && tam == 0 && memorias[m]) {
-                        /* Concepto en JMN: intentar obtener texto (cache, JMN) antes de mapa */
-                        char buf_texto[512];
-                        if (jmn_obtener_texto(memorias[m], id, buf_texto, sizeof(buf_texto)) >= 0 && buf_texto[0]) {
-                            vm_text_cache_put(vm, id, buf_texto);
-                            vm_escribir_cadena(buf_texto);
-                            impreso = 1;
-                            imprimir_brackets = 0;
-                        }
-                    }
-                    /* Solo imprimir mapa/lista si no es un concepto con texto (evitar {1: 1}) */
-                    if (m == 1 && tam == 0 && es_mapa) {
-                        /* Intentar texto del primer destino con tipo SECUENCIA/ASOCIACION antes de "?" */
-                        int fallback_ok = 0;
-                        for (uint32_t j = 0; j < c_count && !fallback_ok; j++) {
-                            uint32_t dest = conexiones[j].destino_id;
-                            if (dest == 0 || dest == id) continue;
-                            char buf_dest[512];
-                            if (jmn_obtener_texto(memorias[m], dest, buf_dest, sizeof(buf_dest)) >= 0 && buf_dest[0]) {
-                                vm_escribir_cadena(buf_dest);
-                                fallback_ok = 1;
-                            }
-                        }
-                        if (!fallback_ok) vm_escribir_cadena("?");
-                        impreso = 1;
-                        imprimir_brackets = 0;
-                    }
-                    if (imprimir_brackets) {
-                    /* Evitar {1:1} {3:1}: si es mapa interno, intentar texto de destinos; si no hay, imprimir ? */
-                    if (es_mapa && c_count > 0) {
-                        int fallback_ok = 0;
-                        for (uint32_t j = 0; j < c_count && j < 64 && !fallback_ok; j++) {
-                            uint32_t dest = conexiones[j].destino_id;
-                            if (dest == 0 || dest == id) continue;
-                            char buf_dest[512];
-                            if (m_neu && jmn_obtener_texto(m_neu, dest, buf_dest, sizeof(buf_dest)) >= 0 && buf_dest[0]) {
-                                vm_escribir_cadena(buf_dest);
-                                fallback_ok = 1;
-                            } else if (memorias[m] && jmn_obtener_texto(memorias[m], dest, buf_dest, sizeof(buf_dest)) >= 0 && buf_dest[0]) {
-                                vm_escribir_cadena(buf_dest);
-                                fallback_ok = 1;
-                            }
-                        }
-                        if (!fallback_ok) {
-                            vm_escribir_cadena("?");
-                            fallback_ok = 1;
-                        }
-                        if (fallback_ok) {
-                            impreso = 1;
-                            imprimir_brackets = 0;
-                        }
-                    }
-                    if (imprimir_brackets) {
-                    vm_escribir_cadena(es_mapa ? "{" : "[");
-                    if (es_mapa) {
-                        int first = 1;
-                        for (uint32_t j = 0; j < c_count; j++) {
-                            if (conexiones[j].key_id == 0 || conexiones[j].destino_id == 0) continue;
-                            if (!first) vm_escribir_cadena(", ");
-                            first = 0;
-                            
-                            // Imprimir Clave
-                            const char* k_txt = vm_text_cache_get(vm, conexiones[j].key_id);
-                            if (k_txt) vm_escribir_cadena(k_txt);
-                            else { char b[32]; snprintf(b, sizeof(b), "%u", conexiones[j].key_id); vm_escribir_cadena(b); }
-                            
-                            vm_escribir_cadena(": ");
-                            
-                            // Imprimir Valor
-                            uint32_t item_node_id = conexiones[j].destino_id;
-                            JMNNodo* v_nodo = jmn_obtener_nodo(memorias[m], item_node_id);
-                            uint32_t val_id = v_nodo ? v_nodo->peso.u : 0;
-                            const char* v_txt = val_id ? vm_text_cache_get(vm, val_id) : NULL;
-                            char v_buf[512];
-                            if (!v_txt && val_id && m_neu && jmn_obtener_texto(m_neu, val_id, v_buf, sizeof(v_buf)) >= 0 && v_buf[0])
-                                v_txt = v_buf;
-                            if (v_txt) {
-                                vm_escribir_cadena("\""); vm_escribir_cadena(v_txt); vm_escribir_cadena("\"");
-                            } else {
-                                JMNValor weight = v_nodo ? v_nodo->peso : (JMNValor){0};
-                                char b[64];
-                                // Heurística: si parece un ID de texto o un float razonable
-                                if (weight.u > 0 && weight.u < 1000000) {
-                                    snprintf(b, sizeof(b), "%u", weight.u);
-                                } else if (weight.f == (float)((long long)weight.f)) {
-                                    snprintf(b, sizeof(b), "%lld", (long long)weight.f);
-                                } else {
-                                    snprintf(b, sizeof(b), "%.2f", weight.f);
-                                }
-                                vm_escribir_cadena(b);
-                            }
-                        }
-                    } else {
-                        // Es una lista tradicional
-                        for (uint32_t i = 0; i < tam; i++) {
-                            JMNValor v = jmn_lista_obtener(memorias[m], id, i);
-                            const char* v_txt = v.u ? vm_text_cache_get(vm, v.u) : NULL;
-                            char v_li[512];
-                            if (!v_txt && v.u && m_neu && jmn_obtener_texto(m_neu, v.u, v_li, sizeof(v_li)) >= 0 && v_li[0])
-                                v_txt = v_li;
-                            if (v_txt) {
-                                vm_escribir_cadena("\""); vm_escribir_cadena(v_txt); vm_escribir_cadena("\"");
-                            } else {
-                                char b[64];
-                                if (v.u > 0 && v.u < 1000000) {
-                                    snprintf(b, sizeof(b), "%u", v.u);
-                                } else if (v.f == (float)((long long)v.f)) {
-                                    snprintf(b, sizeof(b), "%lld", (long long)v.f);
-                                } else {
-                                    snprintf(b, sizeof(b), "%.2f", v.f);
-                                }
-                                vm_escribir_cadena(b);
-                            }
-                            if (i < tam - 1) vm_escribir_cadena(", ");
-                            if (i >= 50) { vm_escribir_cadena("..."); break; }
-                        }
-                    }
-                    vm_escribir_cadena(es_mapa ? "}" : "]");
-                    impreso = 1;
-                    }
-                    }
-                }
-            }
-
-            // 2. Intentar texto en memoria neuronal cognitiva si no se imprimió como colección (ids hash suelen ser < 0x10000)
-            if (!impreso && m_neu && id != 0) {
-                char buffer[4096];
-                buffer[0] = '\0';
-                if (jmn_obtener_texto(m_neu, id, buffer, sizeof(buffer)) >= 0 && buffer[0]) {
-                    vm_text_cache_put(vm, id, buffer);
-                    vm_escribir_cadena(buffer);
-                    impreso = 1;
-                }
-            }
+            JMNValor v;
+            v.u = id;
+            vm_imprimir_valor_recursivo(vm, v, 0);
+#else
+            vm_escribir_entero((uint64_t)id);
 #endif
-            // 3. Intentar texto en cache (literal o IDs registrados)
-            if (!impreso) {
-                const char* cached = vm_text_cache_get(vm, id);
-                if (cached && cached[0]) {
-                    vm_escribir_cadena(cached);
-                    impreso = 1;
-                }
-            }
-
-            // 4. Fallback: Heurística de flotante vs entero
-            if (!impreso) {
-                uint32_t exp = (id >> 23) & 0xFF;
-                if (id > 1000000 && exp > 0x30 && exp < 0xA0) {
-                    union { uint32_t u; float f; } cast;
-                    cast.u = id;
-                    vm_escribir_flotante(cast.f);
-                } else {
-                    vm_escribir_entero((uint64_t)id);
-                }
-            }
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
@@ -4741,6 +4872,12 @@ int vm_step(VM* vm) {
                 }
                 JMNValor v_peso; v_peso.f = peso;
                 jmn_agregar_conexion(vm->mem_neuronal, id1, id2, v_peso, 1);
+                if (getenv("JASBOOT_DEBUG")) {
+                    const char* t1 = vm_text_cache_get(vm, id1);
+                    const char* t2 = vm_text_cache_get(vm, id2);
+                    fprintf(stderr, "[VM OP_MEM_ASOCIAR_CONCEPTOS] id1=%u ('%s') -> id2=%u ('%s') peso=%.3f tipo=1\n",
+                            id1, t1 ? t1 : "?", id2, t2 ? t2 : "?", peso);
+                }
             }
 #endif
             vm->pc += IR_INSTRUCTION_SIZE;
@@ -4871,7 +5008,7 @@ int vm_step(VM* vm) {
                 if (res != 0) {
                     char buf[4096];
                     if (jmn_obtener_texto(vm->mem_neuronal, res, buf, sizeof(buf)) == 0) vm_text_cache_put(vm, res, buf);
-                    if (addr + sizeof(uint64_t) <= vm->memory_size) *(uint64_t*)(vm->memory + addr) = (uint64_t)res;
+                    (void)vm_mem_write_u64_checked(vm, addr, (uint64_t)res);
                 }
             }
 #endif
@@ -5037,9 +5174,7 @@ int vm_step(VM* vm) {
                 }
                 
                 // Guardar resultado en memoria
-                if (dest_addr + sizeof(uint64_t) <= vm->memory_size) {
-                    *(uint64_t*)(vm->memory + dest_addr) = (uint64_t)id_res;
-                }
+                (void)vm_mem_write_u64_checked(vm, dest_addr, (uint64_t)id_res);
                 
                 // Cachear texto para optimizar visualización posterior
                 char buffer[4096];
@@ -5625,9 +5760,28 @@ int vm_step(VM* vm) {
         }
 
         case OP_STR_DESDE_NUMERO: {
-            uint64_t reg_val = vm_get_register(vm, inst.operand_b);
-            char buf[64];
+            uint32_t id = (uint32_t)vm_get_register(vm, inst.operand_b);
             
+            /* Si ya es un texto en cache o JMN, devolverlo directamente */
+            const char* cached = vm_text_cache_get(vm, id);
+            if (cached) {
+                vm_set_register(vm, inst.operand_a, (uint64_t)id);
+                vm->pc += IR_INSTRUCTION_SIZE;
+                break;
+            }
+#ifdef JASBOOT_LANG_INTEGRATION
+            if (vm->mem_neuronal) {
+                char buf_txt[512];
+                if (jmn_obtener_texto(vm->mem_neuronal, id, buf_txt, sizeof(buf_txt)) >= 0 && buf_txt[0]) {
+                    vm_text_cache_put(vm, id, buf_txt);
+                    vm_set_register(vm, inst.operand_a, (uint64_t)id);
+                    vm->pc += IR_INSTRUCTION_SIZE;
+                    break;
+                }
+            }
+#endif
+
+            char buf[64];
             // Flag de tipo en operand_c (1=entero, 0=float)
             int is_int = 0;
             if (inst.flags & IR_INST_FLAG_C_IMMEDIATE) {
@@ -5635,33 +5789,66 @@ int vm_step(VM* vm) {
             } else {
                 is_int = (vm_get_register(vm, inst.operand_c) == 1);
             }
-            
+
             if (is_int) {
-                snprintf(buf, sizeof(buf), "%lld", (long long)reg_val);
+                snprintf(buf, sizeof(buf), "%lld", (long long)id);
             } else {
-                union { uint64_t u64; float f32; } u = {0};
-                u.u64 = (uint32_t)reg_val;
+                union { uint32_t u32; float f32; } u;
+                u.u32 = id;
                 float val = u.f32;
-                if (val == (float)((long long)val)) {
+                if (val == (float)((long long)val))
                     snprintf(buf, sizeof(buf), "%lld", (long long)val);
-                } else {
-                    snprintf(buf, sizeof(buf), "%.2f", val);
-                }
+                else
+                    snprintf(buf, sizeof(buf), "%.4f", (double)val);
             }
             
-            uint32_t id_res = 0;
-            /* Bypasseamos integración neuronal para mayor estabilidad en compilador */
-            /*
-#ifdef JASBOOT_LANG_INTEGRATION
-            if (vm->mem_neuronal) {
-                id_res = jmn_registrar_texto_dinamico(vm->mem_neuronal, buf);
-            }
-#endif
+            uint32_t id_res = vm_hash_texto(buf);
+            vm_text_cache_put(vm, id_res, buf);
+            vm_set_register(vm, inst.operand_a, (uint64_t)id_res);
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+
+        case OP_STR_DESDE_ANY: {
+            uint64_t reg_val = vm_get_register(vm, inst.operand_b);
+            char buf[64];
+
+            /* Heurística mejorada: 
+               En Jasboot, los IDs de texto suelen ser < 0x10000000 (hashes o contadores bajos).
+               Los flotantes (IEEE 754 32-bit) en rangos comunes (0.0001 a 10^10) 
+               tienen el bit 31 en 0 y exponentes entre 0x38 y 0x4E.
+               0x38000000 es ~0.00000005
+               0x4E800000 es ~1,000,000,000
             */
-            if (id_res == 0) {
-                id_res = vm_hash_texto(buf);
-                vm_text_cache_put(vm, id_res, buf);
+            uint32_t u32 = (uint32_t)reg_val;
+            int is_float = 0;
+            
+            if (u32 >= 0x38000000 && u32 <= 0x50000000) {
+                is_float = 1;
+            } else if (u32 >= 0xB8000000 && u32 <= 0xD0000000) {
+                /* Flotantes negativos */
+                is_float = 1;
             }
+            
+            if (is_float) {
+                union { uint32_t u32; float f32; } u;
+                u.u32 = u32;
+                float f = u.f32;
+                if (!isnan(f) && !isinf(f)) {
+                    if (f == (float)((long int)f)) {
+                        snprintf(buf, sizeof(buf), "%ld", (long int)f);
+                    } else {
+                        snprintf(buf, sizeof(buf), "%.4f", (double)f);
+                    }
+                } else {
+                    snprintf(buf, sizeof(buf), "%lld", (long long)reg_val);
+                }
+            } else {
+                snprintf(buf, sizeof(buf), "%lld", (long long)reg_val);
+            }
+            
+            uint32_t id_res = vm_hash_texto(buf);
+            vm_text_cache_put(vm, id_res, buf);
             vm_set_register(vm, inst.operand_a, (uint64_t)id_res);
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
@@ -5893,9 +6080,7 @@ int vm_step(VM* vm) {
                     valor = (uint64_t)(nodo->peso.u);
                 }
                 
-                if (dest_addr + sizeof(uint64_t) <= vm->memory_size) {
-                    *(uint64_t*)(vm->memory + dest_addr) = valor;
-                }
+                (void)vm_mem_write_u64_checked(vm, dest_addr, valor);
             }
 #endif
             vm->pc += IR_INSTRUCTION_SIZE;
@@ -5926,12 +6111,13 @@ int vm_step(VM* vm) {
 
         case OP_LEER_U32_IND: {
             uint64_t addr = vm->registers[inst.operand_b];
-            if (addr + 4 <= vm->memory_size) {
+            {
                 uint32_t val = 0;
-                memcpy(&val, vm->memory + addr, 4);
+                if (vm_mem_read_u32_checked(vm, addr, &val)) {
                 vm->registers[inst.operand_a] = (uint64_t)val;
-            } else {
+                } else {
                 vm->registers[inst.operand_a] = 0;
+                }
             }
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
@@ -6807,6 +6993,14 @@ int vm_step(VM* vm) {
             } else {
                 id = (uint32_t)vm_get_register(vm, inst.operand_b);
             }
+
+            if (id == 0) {
+                static uint32_t s_list_counter = 0;
+                s_list_counter++;
+                id = ((uint32_t)time(NULL) ^ 0x07654321u) + (s_list_counter * 0x9E3779B9u);
+                id |= 0x80000000u; /* Mark as anonymous/generated */
+            }
+
 #ifdef JASBOOT_LANG_INTEGRATION
             /* Prioridad: memoria neuronal persistente si está abierta; si no, RAM efímera. */
             JMNMemoria* m_target = vm->mem_neuronal ? vm->mem_neuronal : vm->mem_colecciones;
@@ -6987,15 +7181,25 @@ int vm_step(VM* vm) {
             uint32_t list_id_val = (uint32_t)b_val;
             uint32_t tam = 0;
             int ok_size = 0;
+            if (getenv("JASBOOT_DEBUG")) {
+                fprintf(stderr, "[VM OP_MEM_LISTA_TAMANO] Recibido list_id=%u (0x%08X)\n", 
+                        list_id_val, list_id_val);
+            }
             tam = vm_list_size_cache_get(vm, list_id_val, &ok_size);
 #ifdef JASBOOT_LANG_INTEGRATION
             if (!ok_size) {
-                JMNMemoria* m_target = (vm->mem_neuronal && jmn_lista_existe(vm->mem_neuronal, list_id_val))
-                                       ? vm->mem_neuronal : vm->mem_colecciones;
+                int en_neuronal = (vm->mem_neuronal && jmn_lista_existe(vm->mem_neuronal, list_id_val));
+                int en_colecciones = (vm->mem_colecciones && jmn_lista_existe(vm->mem_colecciones, list_id_val));
+                JMNMemoria* m_target = en_neuronal ? vm->mem_neuronal : vm->mem_colecciones;
                 if (!m_target) { ensure_jmn_col(vm); m_target = vm->mem_colecciones; }
                 if (m_target) {
                     tam = (uint32_t)jmn_lista_tamano(m_target, list_id_val);
                     vm_list_size_cache_set(vm, list_id_val, tam);
+                    if (getenv("JASBOOT_DEBUG")) {
+                        fprintf(stderr, "[VM OP_MEM_LISTA_TAMANO] list_id=%u en_neuronal=%d en_colecciones=%d usando=%s tam=%u\n",
+                                list_id_val, en_neuronal, en_colecciones, 
+                                (m_target == vm->mem_neuronal) ? "neuronal" : "colecciones", tam);
+                    }
                 }
             }
 #endif
@@ -7200,6 +7404,266 @@ int vm_step(VM* vm) {
             break;
         }
 
+        case OP_MEM_BUSCAR_INTROSPECTIVA: {
+            // A <- primer ID que contiene texto B (búsqueda introspectiva case insensitive)
+#ifdef JASBOOT_LANG_INTEGRATION
+            if (vm->mem_neuronal) {
+                uint64_t b_val = vm_get_register(vm, inst.operand_b);
+                uint32_t texto_id = (uint32_t)b_val;
+                
+                // Obtener el texto a buscar
+                char termino[256];
+                if (jmn_obtener_texto(vm->mem_neuronal, texto_id, termino, sizeof(termino)) <= 0) {
+                    // Intentar obtener del cache de texto
+                    const char* cache_text = vm_text_cache_get(vm, texto_id);
+                    if (cache_text && cache_text[0]) {
+                        strncpy(termino, cache_text, sizeof(termino) - 1);
+                        termino[sizeof(termino) - 1] = '\0';
+                    } else {
+                        vm_set_register(vm, inst.operand_a, 0);
+                        vm->pc += IR_INSTRUCTION_SIZE;
+                        break;
+                    }
+                }
+                
+                // Realizar búsqueda introspectiva
+                JMNBusquedaIntrospectivaResultado resultados[1];
+                int count = jmn_buscar_introspectiva(vm->mem_neuronal, termino, resultados, 1, 0); // case insensitive
+                
+                if (count > 0) {
+                    vm_set_register(vm, inst.operand_a, (uint64_t)resultados[0].id);
+                    if (getenv("JASBOOT_DEBUG")) {
+                        fprintf(stderr, "[VM] Búsqueda introspectiva '%s' encontró ID %u\n", termino, resultados[0].id);
+                    }
+                } else {
+                    vm_set_register(vm, inst.operand_a, 0);
+                    if (getenv("JASBOOT_DEBUG")) {
+                        fprintf(stderr, "[VM] Búsqueda introspectiva '%s' no encontró resultados\n", termino);
+                    }
+                }
+            } else {
+                vm_set_register(vm, inst.operand_a, 0);
+            }
+#else
+            vm_set_register(vm, inst.operand_a, 0);
+#endif
+            vm_percepcion_push(vm, (uint32_t)vm_get_register(vm, inst.operand_a));
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+
+        case OP_MEM_BUSCAR_INTROSPECTIVA_LISTA: {
+            // A <- lista_id con IDs encontrados; B=termino_id, C=max_resultados
+#ifdef JASBOOT_LANG_INTEGRATION
+            if (vm->mem_neuronal) {
+                uint64_t b_val = vm_get_register(vm, inst.operand_b);
+                uint64_t c_val = vm_get_register(vm, inst.operand_c);
+                uint32_t texto_id = (uint32_t)b_val;
+                uint32_t max_resultados = (uint32_t)c_val;
+                
+                if (max_resultados == 0) max_resultados = 10;
+                if (max_resultados > 100) max_resultados = 100;
+                
+                // Obtener el texto a buscar
+                char termino[256];
+                if (jmn_obtener_texto(vm->mem_neuronal, texto_id, termino, sizeof(termino)) <= 0) {
+                    const char* cache_text = vm_text_cache_get(vm, texto_id);
+                    if (cache_text && cache_text[0]) {
+                        strncpy(termino, cache_text, sizeof(termino) - 1);
+                        termino[sizeof(termino) - 1] = '\0';
+                    } else {
+                        vm_set_register(vm, inst.operand_a, 0);
+                        vm->pc += IR_INSTRUCTION_SIZE;
+                        break;
+                    }
+                }
+                
+                // Crear lista para almacenar resultados
+                uint32_t lista_id = vm_alloc_runtime_text_id(vm);
+                jmn_crear_lista(vm->mem_neuronal, lista_id);
+                
+                // Buscar y agregar IDs a la lista
+                uint32_t* ids = malloc(sizeof(uint32_t) * max_resultados);
+                if (ids) {
+                    int count = jmn_buscar_introspectiva_lista(vm->mem_neuronal, termino, ids, max_resultados, 0);
+                    
+                    if (count > 0) {
+                        for (int i = 0; i < count; i++) {
+                            JMNValor val;
+                            val.u = ids[i];
+                            jmn_lista_agregar(vm->mem_neuronal, lista_id, val);
+                        }
+                    }
+                    free(ids);
+                    
+                    if (getenv("JASBOOT_DEBUG")) {
+                        fprintf(stderr, "[VM] Búsqueda introspectiva lista '%s' encontró %d resultados\n", termino, count);
+                    }
+                }
+                
+                vm_set_register(vm, inst.operand_a, (uint64_t)lista_id);
+                if (getenv("JASBOOT_DEBUG")) {
+                    fprintf(stderr, "[VM] Lista ID devuelto: %u en registro A (operand_a=%d)\n", lista_id, inst.operand_a);
+                }
+            } else {
+                vm_set_register(vm, inst.operand_a, 0);
+            }
+#else
+            vm_set_register(vm, inst.operand_a, 0);
+#endif
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+
+        case OP_MEM_BUSCAR_INTROSPECTIVA_CS: {
+            // A <- primer ID encontrado; B=termino_id, C=case_sensitive(0/1)
+#ifdef JASBOOT_LANG_INTEGRATION
+            if (vm->mem_neuronal) {
+                uint64_t b_val = vm_get_register(vm, inst.operand_b);
+                uint64_t c_val = vm_get_register(vm, inst.operand_c);
+                uint32_t texto_id = (uint32_t)b_val;
+                int case_sensitive = (int)(c_val & 0xFF);
+                
+                // Obtener el texto a buscar
+                char termino[256];
+                if (jmn_obtener_texto(vm->mem_neuronal, texto_id, termino, sizeof(termino)) <= 0) {
+                    const char* cache_text = vm_text_cache_get(vm, texto_id);
+                    if (cache_text && cache_text[0]) {
+                        strncpy(termino, cache_text, sizeof(termino) - 1);
+                        termino[sizeof(termino) - 1] = '\0';
+                    } else {
+                        vm_set_register(vm, inst.operand_a, 0);
+                        vm->pc += IR_INSTRUCTION_SIZE;
+                        break;
+                    }
+                }
+                
+                // Realizar búsqueda con control de case sensitive
+                JMNBusquedaIntrospectivaResultado resultado;
+                int found = jmn_buscar_introspectiva_cs(vm->mem_neuronal, termino, &resultado, case_sensitive);
+                
+                if (found > 0) {
+                    vm_set_register(vm, inst.operand_a, (uint64_t)resultado.id);
+                    vm_set_register(vm, inst.operand_a, (uint64_t)resultado.id);
+                    if (getenv("JASBOOT_DEBUG")) {
+                        fprintf(stderr, "[VM] Búsqueda introspectiva CS '%s' (cs=%d) encontró ID %u en registro A (operand_a=%d)\n", 
+                                termino, case_sensitive, resultado.id, inst.operand_a);
+                    }
+                } else {
+                    vm_set_register(vm, inst.operand_a, 0);
+                    if (getenv("JASBOOT_DEBUG")) {
+                        fprintf(stderr, "[VM] Búsqueda introspectiva CS '%s' (cs=%d) no encontró resultados\n", 
+                                termino, case_sensitive);
+                    }
+                }
+            } else {
+                vm_set_register(vm, inst.operand_a, 0);
+            }
+#else
+            vm_set_register(vm, inst.operand_a, 0);
+#endif
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+
+        case OP_MEM_BUSCAR_INTROSPECTIVA_DETALLADA: {
+            // A <- lista_id con metadata; B=termino_id, C=max|(case_sensitive<<8)
+#ifdef JASBOOT_LANG_INTEGRATION
+            if (vm->mem_neuronal) {
+                uint64_t b_val = vm_get_register(vm, inst.operand_b);
+                uint64_t c_val = vm_get_register(vm, inst.operand_c);
+                uint32_t texto_id = (uint32_t)b_val;
+                uint32_t packed = (uint32_t)c_val;
+                uint32_t max_resultados = packed & 0xFF;
+                int case_sensitive = (packed >> 8) & 0xFF;
+                
+                if (max_resultados == 0) max_resultados = 10;
+                if (max_resultados > 100) max_resultados = 100;
+                
+                // Obtener el texto a buscar
+                char termino[256];
+                if (jmn_obtener_texto(vm->mem_neuronal, texto_id, termino, sizeof(termino)) <= 0) {
+                    const char* cache_text = vm_text_cache_get(vm, texto_id);
+                    if (cache_text && cache_text[0]) {
+                        strncpy(termino, cache_text, sizeof(termino) - 1);
+                        termino[sizeof(termino) - 1] = '\0';
+                    } else {
+                        vm_set_register(vm, inst.operand_a, 0);
+                        vm->pc += IR_INSTRUCTION_SIZE;
+                        break;
+                    }
+                }
+                
+                // Crear lista para almacenar resultados detallados
+                uint32_t lista_id = vm_alloc_runtime_text_id(vm);
+                jmn_crear_lista(vm->mem_neuronal, lista_id);
+                
+                // Buscar con metadata detallada
+                JMNBusquedaDetalladaResultado* resultados = malloc(sizeof(JMNBusquedaDetalladaResultado) * max_resultados);
+                if (resultados) {
+                    int count = jmn_buscar_introspectiva_detallada(vm->mem_neuronal, termino, resultados, max_resultados, case_sensitive);
+                    
+                    if (count > 0) {
+                        // Crear un mapa por cada resultado con su metadata
+                        for (int i = 0; i < count; i++) {
+                            uint32_t mapa_id = vm_alloc_runtime_text_id(vm);
+                            jmn_crear_mapa(vm->mem_neuronal, mapa_id);
+                            
+                            // Agregar campos del resultado al mapa
+                            JMNValor val;
+                            
+                            // id
+                            val.u = resultados[i].id;
+                            jmn_mapa_insertar(vm->mem_neuronal, mapa_id, jmn_estructura_id_texto("id"), val);
+                            
+                            // texto
+                            uint32_t texto_id_res = vm_alloc_runtime_text_id(vm);
+                            vm_text_cache_put_owned(vm, texto_id_res, strdup(resultados[i].texto), strlen(resultados[i].texto));
+                            val.u = texto_id_res;
+                            jmn_mapa_insertar(vm->mem_neuronal, mapa_id, jmn_estructura_id_texto("texto"), val);
+                            
+                            // posicion
+                            val.u = (uint32_t)resultados[i].posicion;
+                            jmn_mapa_insertar(vm->mem_neuronal, mapa_id, jmn_estructura_id_texto("posicion"), val);
+                            
+                            // longitud_match
+                            val.u = (uint32_t)resultados[i].longitud_match;
+                            jmn_mapa_insertar(vm->mem_neuronal, mapa_id, jmn_estructura_id_texto("longitud_match"), val);
+                            
+                            // es_clave
+                            val.u = (uint32_t)resultados[i].es_clave;
+                            jmn_mapa_insertar(vm->mem_neuronal, mapa_id, jmn_estructura_id_texto("es_clave"), val);
+                            
+                            // relevancia
+                            val.f = resultados[i].relevancia;
+                            jmn_mapa_insertar(vm->mem_neuronal, mapa_id, jmn_estructura_id_texto("relevancia"), val);
+                            
+                            // Agregar el mapa a la lista
+                            val.u = mapa_id;
+                            jmn_lista_agregar(vm->mem_neuronal, lista_id, val);
+                        }
+                    }
+                    free(resultados);
+                    
+                    if (getenv("JASBOOT_DEBUG")) {
+                        fprintf(stderr, "[VM] Búsqueda introspectiva detallada '%s' encontró %d resultados\n", termino, count);
+                    }
+                }
+                
+                vm_set_register(vm, inst.operand_a, (uint64_t)lista_id);
+                if (getenv("JASBOOT_DEBUG")) {
+                    fprintf(stderr, "[VM] Lista detallada ID devuelto: %u en registro A (operand_a=%d)\n", lista_id, inst.operand_a);
+                }
+            } else {
+                vm_set_register(vm, inst.operand_a, 0);
+            }
+#else
+            vm_set_register(vm, inst.operand_a, 0);
+#endif
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+
         case OP_MEM_BUSCAR_ASOCIADOS: {
             // A <- mejor concepto asociado a B (origen); C = tipo_relacion (0 = cualquiera). Umbral 0.1, profundidad 2.
 #ifdef JASBOOT_LANG_INTEGRATION
@@ -7285,41 +7749,7 @@ int vm_step(VM* vm) {
             break;
         }
 
-        case OP_MEM_RESOLVER_CONFLICTOS: {
-#ifdef JASBOOT_LANG_INTEGRATION
-            if (vm->mem_neuronal) {
-                uint64_t b_val = vm_get_register(vm, inst.operand_b);
-                uint64_t c_val = vm_get_register(vm, inst.operand_c);
-                uint32_t origen_id = (uint32_t)b_val;
-                uint32_t tipo_relacion = (uint32_t)(c_val & 0xFFu);
-                if (tipo_relacion > JMN_RELACION_MAX) tipo_relacion = 0;
-                JMNBusquedaResultado resultados[32];
-                JMNConflictoResultado out;
-                vm_rastro_clear(vm);
-                vm_rastro_push(vm, origen_id, 1.0f);
-                int n = jmn_buscar_asociaciones(vm->mem_neuronal, origen_id, tipo_relacion, 0.1f, 2, resultados, 32);
-                for (int ri = 0; ri < n; ri++)
-                    vm_rastro_push(vm, resultados[ri].id, resultados[ri].fuerza);
-                if (n >= 2) {
-                    (void)jmn_resolver_conflictos(vm->mem_neuronal, origen_id, tipo_relacion, 0.1f, 2,
-                        resultados, (uint16_t)n, 0.4f, 0.2f, &out);
-                    vm_set_register(vm, inst.operand_a, (uint64_t)out.id_ganador);
-                } else if (n == 1) {
-                    vm_set_register(vm, inst.operand_a, (uint64_t)resultados[0].id);
-                } else {
-                    vm_set_register(vm, inst.operand_a, 0);
-                }
-            } else {
-                vm_set_register(vm, inst.operand_a, 0);
-            }
-#else
-            vm_set_register(vm, inst.operand_a, 0);
-#endif
-            vm_percepcion_push(vm, (uint32_t)vm_get_register(vm, inst.operand_a));
-            vm->pc += IR_INSTRUCTION_SIZE;
-            break;
-        }
-
+        
         case OP_MEM_ELEGIR_POR_PESO_IDX:
         case OP_MEM_ELEGIR_POR_PESO_ID: {
 #ifdef JASBOOT_LANG_INTEGRATION
@@ -7365,6 +7795,14 @@ int vm_step(VM* vm) {
                 if (K == 0 || K > 64) K = 16;
                 JMNBusquedaResultado resultados[64];
                 int n = jmn_buscar_asociaciones(vm->mem_neuronal, origen_id, tipo_relacion, 0.1f, 2, resultados, (uint16_t)K);
+                if (getenv("JASBOOT_DEBUG")) {
+                    fprintf(stderr, "[VM OP_MEM_BUSCAR_ASOCIADOS_LISTA] origen=%u tipo=%u K=%u umbral=0.1 -> n=%d resultados\n",
+                            origen_id, tipo_relacion, K, n);
+                    for (int i = 0; i < n; i++) {
+                        fprintf(stderr, "  [%d] id=%u tipo=%u fuerza=%.3f\n", 
+                                i, resultados[i].id, resultados[i].tipo_relacion, resultados[i].fuerza);
+                    }
+                }
                 uint32_t list_id = (origen_id ^ 0xA5A5A5A5u) | 0x80000000u;
                 ensure_jmn_col(vm);
                 if (vm->mem_colecciones) {
@@ -7372,6 +7810,16 @@ int vm_step(VM* vm) {
                     for (int i = 0; i < n; i++) {
                         JMNValor v; v.u = resultados[i].id;
                         jmn_lista_agregar(vm->mem_colecciones, list_id, v);
+                    }
+                    if (getenv("JASBOOT_DEBUG")) {
+                        uint32_t tam_final = jmn_lista_tamano(vm->mem_colecciones, list_id);
+                        int existe = jmn_lista_existe(vm->mem_colecciones, list_id);
+                        fprintf(stderr, "[VM OP_MEM_BUSCAR_ASOCIADOS_LISTA] list_id=%u agregados=%d tam_final=%u existe=%d\n",
+                                list_id, n, tam_final, existe);
+                    }
+                } else {
+                    if (getenv("JASBOOT_DEBUG")) {
+                        fprintf(stderr, "[VM OP_MEM_BUSCAR_ASOCIADOS_LISTA] ERROR: vm->mem_colecciones es NULL\n");
                     }
                 }
                 vm_set_register(vm, inst.operand_a, (uint64_t)list_id);
@@ -7382,6 +7830,19 @@ int vm_step(VM* vm) {
             vm_set_register(vm, inst.operand_a, 0);
 #endif
             vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+
+        case OP_LANZAR: {
+            uint32_t msg_id = (uint32_t)vm_get_register(vm, inst.operand_a);
+            const char* msg = vm_text_cache_get(vm, msg_id);
+            if (!msg) msg = "Excepcion no controlada";
+            if (!vm_try_catch_or_abort(vm, msg)) {
+                fprintf(stderr, "Error de ejecucion (VM): Excepcion lanzada y no atrapada: %s\n", msg);
+                vm->running = 0;
+                vm->exit_code = 1;
+                return 0;
+            }
             break;
         }
 
@@ -7655,6 +8116,37 @@ int vm_step(VM* vm) {
         break;
     }
 
+    case OP_STR_FORMATEAR_TIMESTAMP: {
+        // A = dest_reg (string ID)
+        // B = timestamp_reg (entero)
+        // C = format_reg (string ID)
+        uint64_t ts_val = vm_get_register(vm, inst.operand_b);
+        
+        // Robustez: si es un ID de cadena que contiene un numero (p.ej. "1776459238"), lo usamos
+        const char* ts_str = vm_text_cache_get(vm, (uint32_t)ts_val);
+        if (ts_str && ts_str[0] >= '0' && ts_str[0] <= '9') {
+            ts_val = (uint64_t)atoll(ts_str);
+        }
+
+        uint64_t fmt_id = vm_get_register(vm, inst.operand_c);
+        
+        const char* fmt_str = vm_text_cache_get(vm, (uint32_t)fmt_id);
+        if (!fmt_str) fmt_str = "%Y-%m-%d %H:%M:%S";
+        
+        time_t t = (time_t)ts_val;
+        struct tm* tm_info = localtime(&t);
+        char buf[128];
+        if (tm_info && strftime(buf, sizeof(buf), fmt_str, tm_info)) {
+            uint32_t hid = vm_hash_texto(buf);
+            vm_text_cache_put(vm, hid, strdup(buf));
+            vm_set_register(vm, inst.operand_a, (uint64_t)hid);
+        } else {
+            vm_set_register(vm, inst.operand_a, 0);
+        }
+        vm->pc += IR_INSTRUCTION_SIZE;
+        break;
+    }
+
     case OP_MEM_OBTENER_TODOS: {
         uint32_t lista_id = 0xA11C04CE; // "ALL CONCEPTS"
 #ifdef JASBOOT_LANG_INTEGRATION
@@ -7749,6 +8241,17 @@ int vm_step(VM* vm) {
             uint32_t id1 = (uint32_t)a_val;
             uint32_t id2 = (uint32_t)b_val;
             uint32_t tipo = (uint32_t)(c_val & 0xFFu);
+            
+            // Robustez: Si tipo es un ID de cadena (p.ej. "secuencia"), resolverlo
+            if (c_val > 255) {
+                const char* t_str = vm_text_cache_get(vm, (uint32_t)c_val);
+                if (t_str) {
+                    if (strcmp(t_str, "secuencia") == 0) tipo = 3; // JMN_RELACION_SECUENCIA
+                    else if (strcmp(t_str, "similitud") == 0) tipo = 1; // JMN_RELACION_SIMILITUD
+                    else if (strcmp(t_str, "oposicion") == 0) tipo = 2; // JMN_RELACION_OPOSICION
+                }
+            }
+
             uint32_t peso_x1000 = (uint32_t)((c_val >> 8) & 0xFFFFu);
             float peso = (peso_x1000 != 0) ? ((float)peso_x1000 / 1000.0f) : 1.0f;
 
@@ -7879,7 +8382,7 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
     // Optimizacion "computed goto" (si soportado por GCC, de lo contrario un switch unrolled normal)
     uint64_t* regs = vm->registers;
     const uint8_t* code_base = vm->ir->code;
-    size_t code_size = vm->ir->header.code_size;
+    size_t code_exec_end = vm->ir->code_count * IR_INSTRUCTION_SIZE;
 
     #if defined(__GNUC__) && !defined(__clang_analyzer__) && 0
     static void* dispatch_table[256] = { 0 };
@@ -7917,7 +8420,7 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
     }
     
     #define FETCH() \
-        if (vm->pc >= code_size) { vm->running = 0; goto vm_end; } \
+        if (vm->pc >= code_exec_end) { vm->running = 0; goto vm_end; } \
         code_ptr = code_base + vm->pc; \
         opcode = code_ptr[0]; flags = code_ptr[1]; op_a = code_ptr[2]; op_b = code_ptr[3]; op_c = code_ptr[4]; \
         if (opcode != OP_DEBUG_LINE) { \
@@ -8044,7 +8547,7 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
         STEP_AND_DISPATCH();
 
     op_no:
-        regs[op_a] = ~b_val;
+        regs[op_a] = (b_val == 0) ? 1 : 0;
         vm->pc += IR_INSTRUCTION_SIZE;
         STEP_AND_DISPATCH();
 
@@ -8088,8 +8591,8 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
         {
             uint64_t addr = (flags & IR_INST_FLAG_B_IMMEDIATE) ? (uint64_t)op_b : b_val;
             if ((flags & IR_INST_FLAG_B_IMMEDIATE) && (flags & IR_INST_FLAG_C_IMMEDIATE)) addr |= ((uint64_t)op_c << 8);
-            if (flags & IR_INST_FLAG_RELATIVE) addr += vm->fp;
-            if (addr + 8 <= vm->memory_size) regs[op_a] = *(uint64_t*)(vm->memory + addr);
+            if ((flags & IR_INST_FLAG_RELATIVE) && !vm_addr_add_u32(addr, vm->fp, &addr)) addr = UINT64_MAX;
+            if (!vm_mem_read_u64_checked(vm, addr, &regs[op_a])) regs[op_a] = 0;
             vm->pc += IR_INSTRUCTION_SIZE;
         }
         STEP_AND_DISPATCH();
@@ -8103,8 +8606,8 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
         {
             uint64_t addr = (flags & IR_INST_FLAG_A_IMMEDIATE) ? (uint64_t)op_a : a_val;
             if ((flags & IR_INST_FLAG_A_IMMEDIATE) && (flags & IR_INST_FLAG_C_IMMEDIATE)) addr |= ((uint64_t)op_c << 8);
-            if (flags & IR_INST_FLAG_RELATIVE) addr += vm->fp;
-            if (addr + 8 <= vm->memory_size) *(uint64_t*)(vm->memory + addr) = b_val;
+            if ((flags & IR_INST_FLAG_RELATIVE) && !vm_addr_add_u32(addr, vm->fp, &addr)) addr = UINT64_MAX;
+            (void)vm_mem_write_u64_checked(vm, addr, b_val);
             vm->pc += IR_INSTRUCTION_SIZE;
         }
         STEP_AND_DISPATCH();
@@ -8143,8 +8646,10 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
     #undef STEP_AND_DISPATCH
     #else
     while (vm->running) {
-        if (vm->pc >= code_size) {
+        if (vm->pc >= code_exec_end) {
             vm->running = 0;
+            /* Fin alineado a instrucciones completas: no arrastrar exit_code de intentos/errores previos. */
+            vm->exit_code = 0;
             break;
         }
 
@@ -8155,7 +8660,12 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
         uint8_t op_b = code_ptr[3];
         uint8_t op_c = code_ptr[4];
         
-        /* printf("[VM STEP] pc=0x%08llX opcode=0x%02X flags=0x%02X a=%d b=%d c=%d\n", (unsigned long long)vm->pc, opcode, flags, op_a, op_b, op_c); */
+        // Debugging SIGSEGV mejorado
+        if (getenv("JASBOOT_TRACE_CRASH")) {
+            fprintf(stderr, "[VM-TRACE] PC: 0x%04x, OP: 0x%02x, A: %d, B: %d, C: %d, Flags: 0x%02x\n", 
+                    (unsigned int)vm->pc, opcode, op_a, op_b, op_c, flags);
+            fflush(stderr);
+        }
 
         uint64_t a_val = 0, b_val = 0, c_val = 0;
         if (opcode != OP_DEBUG_LINE) {
@@ -8176,6 +8686,7 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
         switch (opcode) {
             case OP_HALT:
                 vm->running = 0;
+                vm->exit_code = 0;
                 break;
             case OP_SUMAR:
                 STORE_REG_FAST(op_a, b_val + c_val);
@@ -8258,6 +8769,7 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
                 vm->pc += IR_INSTRUCTION_SIZE;
                 break;
             case OP_NO:
+                /* Negacion logica (0 -> 1, distinto de 0 -> 0), no complemento a bits. */
                 STORE_REG_FAST(op_a, (b_val == 0) ? 1 : 0);
                 vm->pc += IR_INSTRUCTION_SIZE;
                 break;
@@ -8270,12 +8782,11 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
                 vm->pc += IR_INSTRUCTION_SIZE;
                 break;
             case OP_SI:
-                if (a_val != 0) {
-                    uint64_t addr = b_val;
-                    if (flags & IR_INST_FLAG_C_IMMEDIATE) addr |= ((uint64_t)op_c << 8);
-                    vm->pc = addr;
-                } else {
-                    vm->pc += IR_INSTRUCTION_SIZE;
+                /* OP_SI (trampolin emit_jump_if_nonzero / PATCH_SI) debe coincidir con vm_step:
+                 * destino relativo 16 bits, IR absoluto 24 bits, etc. Evitar duplicar logica en el switch rapido. */
+                if (vm_step(vm) != 0) {
+                    if (vm->exit_code == 0) vm->exit_code = 1;
+                    return vm->exit_code;
                 }
                 break;
             case OP_MOVER: {
@@ -8296,14 +8807,15 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
                 if ((flags & IR_INST_FLAG_B_IMMEDIATE) && (flags & IR_INST_FLAG_C_IMMEDIATE)) {
                     addr |= ((uint64_t)op_c << 8);
                 }
-                if (flags & IR_INST_FLAG_RELATIVE) addr += vm->fp;
-                if (addr + 8 <= vm->memory_size) {
-                    uint64_t val = *(uint64_t*)(vm->memory + addr);
-                    STORE_REG_FAST(op_a, val);
-                    /* printf("[VM READ] memory[0x%08llX] = 0x%016llX\n", (unsigned long long)addr, (unsigned long long)val); */
-                } else if (addr != 0) {
-                    STORE_REG_FAST(op_a, *(uint64_t*)(uintptr_t)addr);
+                if ((flags & IR_INST_FLAG_RELATIVE) && !vm_addr_add_u32(addr, vm->fp, &addr)) {
+                    addr = UINT64_MAX;
                 }
+                
+                uint64_t val = 0;
+                if (!vm_leer_seguro(vm, addr, &val, " (ruta rapida)")) {
+                    return vm->exit_code;
+                }
+                STORE_REG_FAST(op_a, val);
                 vm->pc += IR_INSTRUCTION_SIZE;
                 break;
             }
@@ -8316,11 +8828,11 @@ int vm_run_with_limit(VM* vm, uint64_t max_steps) {
                 if ((flags & IR_INST_FLAG_A_IMMEDIATE) && (flags & IR_INST_FLAG_C_IMMEDIATE)) {
                     addr |= ((uint64_t)op_c << 8);
                 }
-                if (flags & IR_INST_FLAG_RELATIVE) addr += vm->fp;
-                if (addr + 8 <= vm->memory_size) {
-                    *(uint64_t*)(vm->memory + addr) = b_val;
-                } else if (addr != 0) {
-                    *(uint64_t*)(uintptr_t)addr = b_val;
+                if ((flags & IR_INST_FLAG_RELATIVE) && !vm_addr_add_u32(addr, vm->fp, &addr)) {
+                    addr = UINT64_MAX;
+                }
+                if (!vm_escribir_seguro(vm, addr, b_val, " (ruta rapida)")) {
+                    return vm->exit_code;
                 }
                 vm->pc += IR_INSTRUCTION_SIZE;
                 break;

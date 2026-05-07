@@ -131,6 +131,8 @@ void jmn_mapa_insertar(JMNMemoria* mem, uint32_t map_id, uint32_t key, JMNValor 
 /** 1 si la clave existe en el slot del mapa; en *out el valor (si out no es NULL). */
 int jmn_mapa_obtener_si_existe(JMNMemoria* mem, uint32_t map_id, uint32_t key, JMNValor* out);
 JMNValor jmn_mapa_obtener(JMNMemoria* mem, uint32_t map_id, uint32_t key);
+uint32_t jmn_mapa_obtener_llave(JMNMemoria* mem, uint32_t map_id, uint32_t idx);
+JMNValor jmn_mapa_obtener_valor_por_indice(JMNMemoria* mem, uint32_t map_id, uint32_t idx);
 int jmn_mapa_existe(JMNMemoria* mem, uint32_t map_id);
 
 /* Búsqueda e inferencia */
@@ -157,6 +159,50 @@ int jmn_asociar_relacion(JMNMemoria* mem, uint32_t id_a, uint32_t id_b, uint32_t
 float jmn_comparar_patrones(JMNMemoria* mem, uint32_t id_a, uint32_t id_b);
 uint32_t jmn_obtener_relacionados(JMNMemoria* mem, uint32_t id);
 int jmn_extraer_caracter(JMNMemoria* mem, uint32_t id_frase, int32_t indice, uint32_t id_destino);
+
+/* Búsqueda introspectiva en todos los conceptos de la JMN */
+typedef struct JMNBusquedaIntrospectivaResultado {
+    uint32_t id;           /* ID del concepto que contiene el texto */
+    char texto[256];       /* Texto completo del concepto */
+    int posicion;          /* Posición donde se encontró la coincidencia (-1 si no se encontró) */
+} JMNBusquedaIntrospectivaResultado;
+
+/* Estructura detallada con metadata adicional */
+typedef struct JMNBusquedaDetalladaResultado {
+    uint32_t id;           /* ID del concepto que contiene el texto */
+    char texto[256];       /* Texto completo del concepto */
+    int posicion;          /* Posición donde se encontró la coincidencia */
+    int longitud_match;    /* Longitud de la coincidencia encontrada */
+    int es_clave;          /* 1 si se encontró en la clave, 0 si en el valor */
+    float relevancia;      /* Score de relevancia (0.0-1.0) */
+} JMNBusquedaDetalladaResultado;
+
+/* Búsqueda básica (case insensitive, primer resultado) */
+int jmn_buscar_introspectiva(JMNMemoria* mem, const char* termino, 
+                           JMNBusquedaIntrospectivaResultado* resultados, 
+                           uint32_t max_resultados, int case_sensitive);
+
+/* Búsqueda con lista de IDs (solo IDs, sin metadata) */
+int jmn_buscar_introspectiva_lista(JMNMemoria* mem, const char* termino,
+                                   uint32_t* ids, uint32_t max_resultados,
+                                   int case_sensitive);
+
+/* Búsqueda con control de case sensitive (primer resultado) */
+int jmn_buscar_introspectiva_cs(JMNMemoria* mem, const char* termino,
+                                JMNBusquedaIntrospectivaResultado* resultado,
+                                int case_sensitive);
+
+/* Búsqueda detallada con metadata completa */
+int jmn_buscar_introspectiva_detallada(JMNMemoria* mem, const char* termino,
+                                       JMNBusquedaDetalladaResultado* resultados,
+                                       uint32_t max_resultados,
+                                       int case_sensitive);
+
+/* Funciones auxiliares */
+int jmn_buscar_conceptos_con_texto(JMNMemoria* mem, const char* termino, 
+                                  uint32_t* ids, uint32_t max_ids, int case_sensitive);
+int jmn_concepto_contiene_texto(JMNMemoria* mem, uint32_t id_concepto, 
+                               const char* termino, int case_sensitive);
 
 #ifdef __cplusplus
 }

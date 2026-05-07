@@ -199,6 +199,9 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != OP_CMP_LT_U && inst.opcode != OP_CMP_GT_U && inst.opcode != OP_CMP_LE_U && inst.opcode != OP_CMP_GE_U &&
             inst.opcode != OP_IR && inst.opcode != OP_SI && inst.opcode != OP_LLAMAR && inst.opcode != OP_RETORNAR &&
             inst.opcode != OP_ID_A_TEXTO &&
+            inst.opcode != OP_STR_DESDE_ANY &&
+            inst.opcode != OP_CONV_ANY2F &&
+            inst.opcode != OP_CONV_ANY2I &&
             inst.opcode != OP_RESERVAR_PILA &&
             inst.opcode != OP_STR_DESDE_NUMERO &&
             inst.opcode != OP_STR_FLOTANTE_PREC &&
@@ -219,6 +222,7 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != OP_TLS_CERRAR &&
             inst.opcode != OP_IO_PAUSA &&
             inst.opcode != OP_PAUSA_MILISEGUNDOS &&
+            inst.opcode != OP_STR_FORMATEAR_TIMESTAMP &&
             inst.opcode != OP_IMPRIMIR_TEXTO &&
             inst.opcode != OP_IO_INGRESAR_TEXTO &&
             inst.opcode != OP_IO_INPUT_REG &&
@@ -333,11 +337,17 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != OP_MEM_BUSCAR_ASOCIADOS &&
             inst.opcode != OP_MEM_BUSCAR_ASOCIADOS_LISTA &&
             inst.opcode != OP_MEM_OBTENER_VALOR &&
+            inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA &&
+            inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA_LISTA &&
+            inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA_CS &&
+            inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA_DETALLADA &&
             inst.opcode != OP_MEM_DECAE_CONEXIONES &&
             inst.opcode != OP_MEM_PROPAGAR_ACTIVACION &&
-            inst.opcode != OP_MEM_RESOLVER_CONFLICTOS &&
             inst.opcode != OP_MEM_REGISTRAR_PATRON &&
             inst.opcode != OP_MEM_OBTENER_RELACION &&
+            inst.opcode != OP_MEM_MAPA_LLAVES &&
+            inst.opcode != OP_MEM_MAPA_TAMANO &&
+            inst.opcode != OP_MEM_MAPA_CONTIENE &&
             inst.opcode != OP_MEM_IMPRIMIR_ID &&
             inst.opcode != OP_STR_A_ENTERO &&
             inst.opcode != OP_STR_A_FLOTANTE &&
@@ -368,6 +378,7 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != 0x69 && inst.opcode != 0x6A && inst.opcode != OP_STR_SUBTEXTO &&
             inst.opcode != OP_GET_FP &&
             inst.opcode != OP_TRY_ENTER && inst.opcode != OP_TRY_LEAVE &&
+            inst.opcode != OP_LANZAR &&
             inst.opcode != OP_NOP && inst.opcode != OP_DEBUG_LINE) {
             info.result = IR_VALID_INVALID_OPCODE;
             info.instruction_index = i;
