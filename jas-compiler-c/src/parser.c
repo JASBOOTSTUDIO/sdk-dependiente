@@ -202,7 +202,20 @@ static const char *token_union_str(const Token *t) {
 /* por compatibilidad historica (p. ej. "a" en formulas) o constructores vec/mat. Las llamadas sistema
    se escriben como identificador-primario en parse_primary. */
 static int keyword_ok_as_user_identifier(const char *s) {
-    return !is_reserved_identifier(s);
+    if (!s || !s[0]) return 0;
+    size_t len = strlen(s);
+    /* En expresiones, permitimos solo simbolos especiales y llamadas del sistema.
+       Los nombres declarados por usuario se validan aparte y NO aceptan keywords. */
+    if (strcmp(s, "resultado") == 0) return 1;
+    if (is_sistema_llamada(s, len)) return 1;
+    /* `padre` se usa como receptor especial en metodos de clase (no como nombre declarado). */
+    if (strcmp(s, "padre") == 0) return 1;
+    /* Constructores nativos vectoriales/matriz usados como llamadas */
+    if (strcmp(s, "vec2") == 0 || strcmp(s, "vec3") == 0 || strcmp(s, "vec4") == 0 ||
+        strcmp(s, "mat3") == 0 || strcmp(s, "mat4") == 0) {
+        return 1;
+    }
+    return 0;
 }
 
 /* Variable, parametro, constante, campo: no usar KEYWORDS salvo excepciones anteriores. */
@@ -234,7 +247,7 @@ static int validate_user_defined_name_tok(Parser *p, const Token *tok) {
         return 0;
     }
 
-    if (tok->type == TOK_KEYWORD && !keyword_ok_as_user_identifier(s)) {
+    if (tok->type == TOK_KEYWORD) {
         if (p->source_path && p->source_path[0])
             set_error_at(p, tok->line, tok->column,
                       "Archivo %s, linea %d, columna %d: '%s' es palabra reservada del lenguaje: aqui se esperaba un "
