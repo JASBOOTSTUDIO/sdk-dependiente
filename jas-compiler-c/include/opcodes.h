@@ -31,6 +31,7 @@
 #define OP_LOAD_STR_HASH  0x05
 #define OP_GET_FP         0x06   /* A <- FP (frame pointer) */
 #define OP_DEBUG_LINE     0x07   /* VM guarda la linea actual en su estado (B|C) */
+#define OP_ANALITICA_MLP_FIT 0x08 /* MLP 1 oculta ReLU + salida sigmoid; ver ir_format.h */
 
 #define OP_SUMAR          0x10
 #define OP_RESTAR         0x11

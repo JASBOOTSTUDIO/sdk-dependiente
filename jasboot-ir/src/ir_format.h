@@ -90,6 +90,8 @@ typedef enum {
     OP_LOAD_STR_HASH = 0x05, // A ← hash(string en Data[B|C])
     OP_GET_FP = 0x06,      // A ← FP
     OP_DEBUG_LINE = 0x07,  // Guarda línea actual en estado de la VM (B|C)
+    /* A <- MSE float (ultimo epoch); B = registro base de 7 args (pesos_id, sesgos_id, X_id, y_id, capas_id, lr f32, epochs u32). */
+    OP_ANALITICA_MLP_FIT = 0x08,
     
     // Aritmética
     OP_SUMAR = 0x10,       // A ← B + C

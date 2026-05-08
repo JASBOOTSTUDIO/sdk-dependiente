@@ -44,6 +44,7 @@ echo JMN package: %JMN_PKG%
 
 echo Compiling VM Core...
 gcc %CFLAGS% -c %SRC_DIR%/vm.c -o %BUILD_DIR%/vm.o || exit /b 1
+gcc %CFLAGS% -c %SRC_DIR%/vm_analitica_mlp.c -o %BUILD_DIR%/vm_analitica_mlp.o || exit /b 1
 gcc %CFLAGS% -c %SRC_DIR%/ir_vm.c -o %BUILD_DIR%/ir_vm.o || exit /b 1
 gcc %CFLAGS% -c %SRC_DIR%/ir_format.c -o %BUILD_DIR%/ir_format.o || exit /b 1
 gcc %CFLAGS% -c %SRC_DIR%/reader_ir.c -o %BUILD_DIR%/reader_ir.o || exit /b 1

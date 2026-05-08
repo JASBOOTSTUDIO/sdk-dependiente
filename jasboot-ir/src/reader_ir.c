@@ -379,6 +379,7 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != OP_GET_FP &&
             inst.opcode != OP_TRY_ENTER && inst.opcode != OP_TRY_LEAVE &&
             inst.opcode != OP_LANZAR &&
+            inst.opcode != OP_ANALITICA_MLP_FIT &&
             inst.opcode != OP_NOP && inst.opcode != OP_DEBUG_LINE) {
             info.result = IR_VALID_INVALID_OPCODE;
             info.instruction_index = i;

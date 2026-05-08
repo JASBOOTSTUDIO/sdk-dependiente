@@ -2840,6 +2840,9 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
 #define ARG1 (cn->n_args > 1 ? cn->args[1] : NULL)
 #define ARG2 (cn->n_args > 2 ? cn->args[2] : NULL)
 #define ARG3 (cn->n_args > 3 ? cn->args[3] : NULL)
+#define ARG4 (cn->n_args > 4 ? cn->args[4] : NULL)
+#define ARG5 (cn->n_args > 5 ? cn->args[5] : NULL)
+#define ARG6 (cn->n_args > 6 ? cn->args[6] : NULL)
 
     /* Antes de cualquier rama que haga `if (!ARG0) return 0`, para no caer en el mensaje generico del caller. */
     if (codegen_error_if_bad_arity_pensar_procesar_texto(cg, cn)) return 1;
@@ -3121,6 +3124,26 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         }
         int r1 = visit_expression(cg, ARG0, dest_reg + 1);
         emit(cg, OP_LOG10, (uint8_t)dest_reg, (uint8_t)r1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "nativo_mlp_entrenar") == 0) {
+        if (cn->n_args != 7) {
+            codegen_error_sistema_incorporada_arity(
+                cg, cn, 7,
+                "pesos_capas, sesgos_capas, X, lista_y, capas_ocultas, learning_rate, epochs",
+                "nativo_mlp_entrenar(pesos, sesgos, X, y, capas, 0.01, 2000)", NULL);
+            return 1;
+        }
+        const int B0 = 40;
+        visit_expression(cg, ARG0, B0);
+        visit_expression(cg, ARG1, B0 + 1);
+        visit_expression(cg, ARG2, B0 + 2);
+        visit_expression(cg, ARG3, B0 + 3);
+        visit_expression(cg, ARG4, B0 + 4);
+        visit_expression(cg, ARG5, B0 + 5);
+        visit_expression(cg, ARG6, B0 + 6);
+        emit(cg, OP_ANALITICA_MLP_FIT, (uint8_t)dest_reg, (uint8_t)B0, 0,
+             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
         return 1;
     }
 
@@ -4103,9 +4126,15 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
     }
     if (strcmp(name, "escribir_archivo") == 0 || strcmp(name, "fs_escribir") == 0) {
         if (!ARG0) return 0;
-        visit_expression(cg, ARG0, 1);
-        if (ARG1) { visit_expression(cg, ARG1, 2); emit(cg, OP_FS_ESCRIBIR, 1, 2, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER); }
-        else emit(cg, OP_FS_ESCRIBIR, 1, 0, 0, IR_INST_FLAG_A_REGISTER);
+        if (ARG1) {
+            /* Firma esperada: escribir_archivo(data, handle) */
+            visit_expression(cg, ARG0, 1); /* data */
+            visit_expression(cg, ARG1, 2); /* handle */
+            emit(cg, OP_FS_ESCRIBIR, 1, 2, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        } else {
+            visit_expression(cg, ARG0, 1); /* data (usar current_file) */
+            emit(cg, OP_FS_ESCRIBIR, 1, 0, 0, IR_INST_FLAG_A_REGISTER);
+        }
         return 1;
     }
     if (strcmp(name, "fin_archivo") == 0) {
@@ -4494,22 +4523,6 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         emit(cg, OP_MOVER, dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
         return 1;
     }
-    if (strcmp(name, "lista_poner") == 0 || strcmp(name, "mem_lista_poner") == 0) {
-        if (cn->n_args < 3) {
-            codegen_error_sistema_lista_arity(cg, cn, name, cn->n_args, 3,
-                "lista, indice (entero) y valor",
-                "lista_poner(mi_lista, 0, valor) o mem_lista_poner(mi_lista, 0, valor)");
-            return 1;
-        }
-        visit_expression(cg, ARG0, dest_reg + 1);
-        visit_expression(cg, ARG1, dest_reg + 2);
-        visit_expression(cg, ARG2, dest_reg + 3);
-        
-        emit(cg, OP_MEM_LISTA_PONER, (uint8_t)(dest_reg + 1), (uint8_t)(dest_reg + 2), (uint8_t)(dest_reg + 3), 
-             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
-        emit(cg, OP_MOVER, dest_reg, dest_reg + 1, 0, IR_INST_FLAG_B_REGISTER);
-        return 1;
-    }
     if (strcmp(name, "lista_obtener") == 0 || strcmp(name, "mem_lista_obtener") == 0) {
         if (cn->n_args < 2) {
             codegen_error_sistema_lista_arity(cg, cn, name, cn->n_args, 2,
@@ -4525,6 +4538,24 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         visit_expression(cg, ARG1, reg_indice);
         emit(cg, OP_MEM_LISTA_OBTENER, (uint8_t)dest_reg, (uint8_t)reg_lista, (uint8_t)reg_indice, 
              IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "lista_poner") == 0 || strcmp(name, "mem_lista_poner") == 0) {
+        if (cn->n_args < 3) {
+            codegen_error_sistema_lista_arity(cg, cn, name, cn->n_args, 3,
+                "lista, indice (entero) y valor",
+                "lista_poner(mi_lista, 0, 42)");
+            return 1;
+        }
+        int reg_lista = (dest_reg <= 252) ? (dest_reg + 1) : 1;
+        int reg_indice = (dest_reg <= 252) ? (dest_reg + 2) : 2;
+        int reg_valor = (dest_reg <= 252) ? (dest_reg + 3) : 3;
+        visit_expression(cg, ARG0, reg_lista);
+        visit_expression(cg, ARG1, reg_indice);
+        visit_expression(cg, ARG2, reg_valor);
+        emit(cg, OP_MEM_LISTA_PONER, (uint8_t)reg_lista, (uint8_t)reg_indice, (uint8_t)reg_valor,
+             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+        emit(cg, OP_MOVER, (uint8_t)dest_reg, (uint8_t)reg_lista, 0, IR_INST_FLAG_B_REGISTER);
         return 1;
     }
     if (strcmp(name, "lista_tamano") == 0 || strcmp(name, "mem_lista_tamano") == 0) {
@@ -5065,6 +5096,10 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
 #undef ARG0
 #undef ARG1
 #undef ARG2
+#undef ARG3
+#undef ARG4
+#undef ARG5
+#undef ARG6
     return 0;
 }
 
@@ -7015,6 +7050,35 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
         if (reject_non_numeric_to_scalar(cg, vt, et, ((IdentifierNode *)an->target)->line,
                                          ((IdentifierNode *)an->target)->col))
             return;
+        /*
+         * Ruta robusta para acumuladores:
+         *   x = x <op> llamada(...)
+         * Evalua primero la derecha, luego recarga x desde memoria, evitando
+         * que llamadas internas pisen el valor acumulado en registros bajos.
+         */
+        if ((vt && (strcmp(vt, "entero") == 0 || strcmp(vt, "flotante") == 0)) &&
+            is_node(an->expression, NODE_BINARY_OP)) {
+            BinaryOpNode *bn_as = (BinaryOpNode *)an->expression;
+            if (bn_as->operator &&
+                (strcmp(bn_as->operator, "+") == 0 || strcmp(bn_as->operator, "-") == 0 ||
+                 strcmp(bn_as->operator, "*") == 0 || strcmp(bn_as->operator, "/") == 0 ||
+                 strcmp(bn_as->operator, "%") == 0) &&
+                is_node(bn_as->left, NODE_IDENTIFIER) &&
+                strcmp(((IdentifierNode *)bn_as->left)->name, name) == 0 &&
+                expr_has_call(bn_as->right)) {
+                int rhs_reg = visit_expression(cg, bn_as->right, 2);
+                if (cg->has_error) return;
+                emit_leer_u24(cg, 1, r.addr, r.is_relative);
+                if (strcmp(bn_as->operator, "+") == 0) emit(cg, OP_SUMAR, 1, 1, (uint8_t)rhs_reg, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+                else if (strcmp(bn_as->operator, "-") == 0) emit(cg, OP_RESTAR, 1, 1, (uint8_t)rhs_reg, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+                else if (strcmp(bn_as->operator, "*") == 0) emit(cg, OP_MULTIPLICAR, 1, 1, (uint8_t)rhs_reg, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+                else if (strcmp(bn_as->operator, "/") == 0) emit(cg, OP_DIVIDIR, 1, 1, (uint8_t)rhs_reg, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+                else emit(cg, OP_MODULO, 1, 1, (uint8_t)rhs_reg, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+                emit_conv_for_store(cg, vt, et, 1);
+                emit_escribir_u24(cg, r.addr, 1, r.is_relative);
+                return;
+            }
+        }
         int prev_allow = cg->expr_allow_func_literal;
         if (vt && strcmp(vt, "funcion") == 0) cg->expr_allow_func_literal = 1;
         int reg = visit_expression(cg, an->expression, 1);
