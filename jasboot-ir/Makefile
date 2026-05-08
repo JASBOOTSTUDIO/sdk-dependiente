@@ -5,6 +5,15 @@ CC = gcc
 JMN_PKG ?= ../jasboot-jmn-core
 CFLAGS = -Wall -Wextra -std=c11 -g -Isrc -I$(JMN_PKG)/src -I$(JMN_PKG)/src/memoria_neuronal -DJASBOOT_LANG_INTEGRATION
 LDFLAGS = -g
+# mingw32-make a veces no define OS=Windows_NT; detectar MinGW por el triplete del compilador.
+TARGET_MACHINE := $(shell $(CC) -dumpmachine 2>/dev/null)
+ifneq ($(findstring mingw,$(TARGET_MACHINE)),)
+LDFLAGS += -lws2_32
+else ifeq ($(OS),Windows_NT)
+LDFLAGS += -lws2_32
+else
+LDFLAGS += -lm
+endif
 
 # Directorios
 SRC_DIR = src
@@ -21,10 +30,12 @@ JMN_OBJS = $(BUILD_DIR)/jmn_nodos.o \
            $(BUILD_DIR)/jmn_utilidades.o \
            $(BUILD_DIR)/jmn_cognitivo.o \
            $(BUILD_DIR)/jmn_texto.o \
+           $(BUILD_DIR)/jmn_busqueda.o \
            $(BUILD_DIR)/jmn_compat.o
 
 # VM Objects
 VM_OBJS = $(BUILD_DIR)/vm.o \
+          $(BUILD_DIR)/vm_analitica_mlp.o \
           $(BUILD_DIR)/ir_format.o \
           $(BUILD_DIR)/reader_ir.o \
           $(BUILD_DIR)/optimizer_ir.o \
@@ -84,6 +95,9 @@ $(BUILD_DIR)/jmn_cognitivo.o: $(JMN_DIR)/memoria_neuronal_cognitivo.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/jmn_texto.o: $(JMN_DIR)/memoria_neuronal_texto_fix.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/jmn_busqueda.o: $(JMN_DIR)/memoria_neuronal_busqueda.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/jmn_compat.o: $(JMN_PKG)/src/platform_compat.c

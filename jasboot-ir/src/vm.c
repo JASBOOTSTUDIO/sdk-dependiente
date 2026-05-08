@@ -3,6 +3,7 @@
 #endif
 
 #include "vm.h"
+#include "vm_analitica_mlp.h"
 #include "reader_ir.h"
 #include "memoria_neuronal/memoria_neuronal.h"
 #include <stdlib.h>
@@ -595,6 +596,21 @@ static void vm_list_size_cache_free(VM* vm) {
     }
     free(vm->list_size_buckets);
     vm->list_size_buckets = NULL;
+}
+
+/* Vacia entradas de tamano de lista sin liberar la tabla de buckets (p. ej. tras OP_ANALITICA_MLP_FIT
+ * que escribe en JMN sin pasar por OP_MEM_LISTA_AGREGAR, que es quien suele actualizar el cache). */
+static void vm_list_size_cache_clear_all_entries(VM* vm) {
+    if (!vm || !vm->list_size_buckets) return;
+    for (size_t i = 0; i < vm->list_size_cache_size; i++) {
+        VMListSizeCacheEntry* it = vm->list_size_buckets[i];
+        while (it) {
+            VMListSizeCacheEntry* next = it->next;
+            free(it);
+            it = next;
+        }
+        vm->list_size_buckets[i] = NULL;
+    }
 }
 
 static void vm_substring_cache_free(VM* vm) {
@@ -4052,14 +4068,22 @@ int vm_step(VM* vm) {
 
 
         case OP_IO_INPUT_REG: {
-            char buffer[256];
+            char buffer[4096];
             if (feof(stdin)) clearerr(stdin);
             if (ferror(stdin)) clearerr(stdin);
             fflush(stdout);
             if (fgets(buffer, sizeof(buffer), stdin)) {
                 size_t len = strlen(buffer);
+                int had_newline = 0;
                 while (len > 0 && (buffer[len - 1] == '\n' || buffer[len - 1] == '\r')) {
                     buffer[--len] = '\0';
+                    had_newline = 1;
+                }
+                if (!had_newline && len == sizeof(buffer) - 1) {
+                    int c = 0;
+                    do {
+                        c = getchar();
+                    } while (c != '\n' && c != '\r' && c != EOF);
                 }
                 uint32_t new_id = 0;
                 int is_numeric = 1;
@@ -4130,33 +4154,48 @@ int vm_step(VM* vm) {
             break;
         }
         case OP_CONV_ANY2F: {
-            uint32_t u32 = (uint32_t)(b_val & 0xFFFFFFFF);
-            int is_float = 0;
-            if ((u32 >= 0x38000000 && u32 <= 0x50000000) || (u32 >= 0xB8000000 && u32 <= 0xD0000000)) {
-                is_float = 1;
-            }
-            if (is_float) {
+            /* elemento suele llevar float32 en los 32 bits bajos; la heurística por ventanas
+               0x38..0x50 fallaba para normales válidos (p. ej. sesgos) y (float)b_val
+               reinterpretaba los bits IEEE como entero enorme. Usar exponente IEEE. */
+            uint32_t u32 = (uint32_t)(b_val & 0xFFFFFFFFu);
+            unsigned exp = (unsigned)((u32 >> 23) & 0xFFu);
+            unsigned frac = (unsigned)(u32 & 0x7FFFFFu);
+            union { uint64_t u64; float f32; } cast = {0};
+
+            if (exp >= 1u && exp <= 254u) {
                 vm_set_register(vm, inst.operand_a, b_val);
+            } else if (exp == 255u) {
+                vm_set_register(vm, inst.operand_a, b_val);
+            } else if (exp == 0u && frac == 0u) {
+                cast.f32 = 0.0f;
+                vm_set_register(vm, inst.operand_a, cast.u64);
             } else {
-                union { uint64_t u64; float f32; } cast = {0};
-                cast.f32 = (float)b_val;
+                cast.f32 = (float)(int32_t)u32;
                 vm_set_register(vm, inst.operand_a, cast.u64);
             }
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
         case OP_CONV_ANY2I: {
-            uint32_t u32 = (uint32_t)(b_val & 0xFFFFFFFF);
-            int is_float = 0;
-            if ((u32 >= 0x38000000 && u32 <= 0x50000000) || (u32 >= 0xB8000000 && u32 <= 0xD0000000)) {
-                is_float = 1;
-            }
-            if (is_float) {
+            uint32_t u32 = (uint32_t)(b_val & 0xFFFFFFFFu);
+            unsigned exp = (unsigned)((u32 >> 23) & 0xFFu);
+            unsigned frac = (unsigned)(u32 & 0x7FFFFFu);
+
+            if (exp >= 1u && exp <= 254u) {
                 union { uint64_t u64; float f32; } cast = {0};
                 cast.u64 = u32;
                 vm_set_register(vm, inst.operand_a, (uint64_t)((long int)cast.f32));
+            } else if (exp == 255u) {
+                union { uint32_t u32b; float f32; } u = {0};
+                u.u32b = u32;
+                if (!isnan(u.f32) && !isinf(u.f32))
+                    vm_set_register(vm, inst.operand_a, (uint64_t)((long int)u.f32));
+                else
+                    vm_set_register(vm, inst.operand_a, (uint64_t)((int32_t)u32));
+            } else if (exp == 0u && frac == 0u) {
+                vm_set_register(vm, inst.operand_a, 0);
             } else {
-                vm_set_register(vm, inst.operand_a, b_val);
+                vm_set_register(vm, inst.operand_a, (uint64_t)((int32_t)u32));
             }
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
@@ -4248,6 +4287,18 @@ int vm_step(VM* vm) {
             union { uint64_t u64; float f32; } rf = {0};
             rf.f32 = r;
             vm_set_register(vm, inst.operand_a, rf.u64);
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+        case OP_ANALITICA_MLP_FIT: {
+            float mse = vm_analitica_mlp_fit_native(vm, (uint8_t)inst.operand_b);
+            vm_list_size_cache_clear_all_entries(vm);
+            union {
+                uint32_t u;
+                float f;
+            } rf;
+            rf.f = mse;
+            vm_set_register(vm, inst.operand_a, (uint64_t)rf.u);
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
@@ -4573,8 +4624,8 @@ int vm_step(VM* vm) {
                     if (sep_len == 0) {
                         p = texto;
                         const char* end = texto_end;
-                        while (*p && ispunct((unsigned char)*p)) p++;
-                        while (end > p && ispunct((unsigned char)*(end - 1))) end--;
+                        while (*p && (isspace((unsigned char)*p) || *p == '"' || *p == '\'')) p++;
+                        while (end > p && (isspace((unsigned char)*(end - 1)) || *(end - 1) == '"' || *(end - 1) == '\'')) end--;
                         size_t len = (size_t)(end - p);
                         if (len >= sizeof(token_norm)) len = sizeof(token_norm) - 1;
                         memcpy(token_norm, p, len);
@@ -4595,9 +4646,9 @@ int vm_step(VM* vm) {
                             while (found < texto_end && (unsigned char)*found != sep_ch) found++;
                             const char* seg_end = found;
                             const char* q = p;
-                            while (q < seg_end && ispunct((unsigned char)*q)) q++;
+                            while (q < seg_end && (isspace((unsigned char)*q) || *q == '"' || *q == '\'')) q++;
                             const char* end = seg_end;
-                            while (end > q && ispunct((unsigned char)*(end - 1))) end--;
+                            while (end > q && (isspace((unsigned char)*(end - 1)) || *(end - 1) == '"' || *(end - 1) == '\'')) end--;
                             size_t len = (size_t)(end - q);
                             if (len >= sizeof(token_norm)) len = sizeof(token_norm) - 1;
                             memcpy(token_norm, q, len);
@@ -4618,9 +4669,9 @@ int vm_step(VM* vm) {
                         const char* found = strstr(p, sep);
                         const char* seg_end = found ? found : texto_end;
                         const char* q = p;
-                        while (q < seg_end && ispunct((unsigned char)*q)) q++;
+                        while (q < seg_end && (isspace((unsigned char)*q) || *q == '"' || *q == '\'')) q++;
                         const char* end = seg_end;
-                        while (end > q && ispunct((unsigned char)*(end - 1))) end--;
+                        while (end > q && (isspace((unsigned char)*(end - 1)) || *(end - 1) == '"' || *(end - 1) == '\'')) end--;
                         size_t len = (size_t)(end - q);
                         if (len >= sizeof(token_norm)) len = sizeof(token_norm) - 1;
                         memcpy(token_norm, q, len);
@@ -5671,9 +5722,10 @@ int vm_step(VM* vm) {
                             s2 = right_small;
                         }
                         char* combined = (char*)malloc(total_len + 1);
-                    if (combined) {
-                        memcpy(combined, s1, l1);
-                        memcpy(combined + l1, s2, l2 + 1);
+                        if (combined) {
+                            memcpy(combined, s1, l1);
+                            memcpy(combined + l1, s2, l2);
+                            combined[total_len] = '\0';
                             id_res = vm_alloc_runtime_text_id(vm);
                             vm_text_cache_put_owned(vm, id_res, combined, total_len);
                         }
@@ -5812,41 +5864,65 @@ int vm_step(VM* vm) {
         case OP_STR_DESDE_ANY: {
             uint64_t reg_val = vm_get_register(vm, inst.operand_b);
             char buf[64];
-
-            /* Heurística mejorada: 
-               En Jasboot, los IDs de texto suelen ser < 0x10000000 (hashes o contadores bajos).
-               Los flotantes (IEEE 754 32-bit) en rangos comunes (0.0001 a 10^10) 
-               tienen el bit 31 en 0 y exponentes entre 0x38 y 0x4E.
-               0x38000000 es ~0.00000005
-               0x4E800000 es ~1,000,000,000
-            */
             uint32_t u32 = (uint32_t)reg_val;
-            int is_float = 0;
-            
-            if (u32 >= 0x38000000 && u32 <= 0x50000000) {
-                is_float = 1;
-            } else if (u32 >= 0xB8000000 && u32 <= 0xD0000000) {
-                /* Flotantes negativos */
-                is_float = 1;
+
+            /* Texto / hash de cadena (mismo criterio que OP_STR_DESDE_NUMERO) */
+            {
+                const char* cached = vm_text_cache_get(vm, u32);
+                if (cached) {
+                    vm_set_register(vm, inst.operand_a, (uint64_t)u32);
+                    vm->pc += IR_INSTRUCTION_SIZE;
+                    break;
+                }
             }
-            
-            if (is_float) {
-                union { uint32_t u32; float f32; } u;
-                u.u32 = u32;
-                float f = u.f32;
-                if (!isnan(f) && !isinf(f)) {
-                    if (f == (float)((long int)f)) {
-                        snprintf(buf, sizeof(buf), "%ld", (long int)f);
+#ifdef JASBOOT_LANG_INTEGRATION
+            if (vm->mem_neuronal) {
+                char buf_txt[512];
+                if (jmn_obtener_texto(vm->mem_neuronal, u32, buf_txt, sizeof(buf_txt)) >= 0 && buf_txt[0]) {
+                    vm_text_cache_put(vm, u32, buf_txt);
+                    vm_set_register(vm, inst.operand_a, (uint64_t)u32);
+                    vm->pc += IR_INSTRUCTION_SIZE;
+                    break;
+                }
+            }
+#endif
+
+            /* IEEE float32: exponente 1..254 cubre normales positivos y negativos (p. ej. sesgos
+               cuya magnitud cae fuera de ventanas fijas 0x38..0x50 / negativos 0xB8..0xD0). */
+            {
+                unsigned exp = (unsigned)((u32 >> 23) & 0xFFu);
+                unsigned frac = (unsigned)(u32 & 0x7FFFFFu);
+                union { uint32_t u32b; float f32; } u;
+
+                if (exp >= 1u && exp <= 254u) {
+                    u.u32b = u32;
+                    float f = u.f32;
+                    if (!isnan(f) && !isinf(f)) {
+                        if (f == (float)((long int)f)) {
+                            snprintf(buf, sizeof(buf), "%ld", (long int)f);
+                        } else {
+                            snprintf(buf, sizeof(buf), "%.4f", (double)f);
+                        }
                     } else {
                         snprintf(buf, sizeof(buf), "%.4f", (double)f);
                     }
+                } else if (exp == 255u) {
+                    u.u32b = u32;
+                    float f = u.f32;
+                    if (isnan(f))
+                        snprintf(buf, sizeof(buf), "nan");
+                    else if (isinf(f))
+                        snprintf(buf, sizeof(buf), "%s", f < 0.0f ? "-inf" : "inf");
+                    else
+                        snprintf(buf, sizeof(buf), "%lld", (long long)(int32_t)u32);
+                } else if (exp == 0u && frac == 0u) {
+                    snprintf(buf, sizeof(buf), "0");
                 } else {
-                    snprintf(buf, sizeof(buf), "%lld", (long long)reg_val);
+                    /* Exp 0 con mantisa: subnormal IEEE o entero en bajos bits; mantener entero sin signo. */
+                    snprintf(buf, sizeof(buf), "%llu", (unsigned long long)u32);
                 }
-            } else {
-                snprintf(buf, sizeof(buf), "%lld", (long long)reg_val);
             }
-            
+
             uint32_t id_res = vm_hash_texto(buf);
             vm_text_cache_put(vm, id_res, buf);
             vm_set_register(vm, inst.operand_a, (uint64_t)id_res);
@@ -6996,9 +7072,12 @@ int vm_step(VM* vm) {
 
             if (id == 0) {
                 static uint32_t s_list_counter = 0;
-                s_list_counter++;
-                id = ((uint32_t)time(NULL) ^ 0x07654321u) + (s_list_counter * 0x9E3779B9u);
-                id |= 0x80000000u; /* Mark as anonymous/generated */
+                /* Antes: time(NULL)^const + golden*counters repetia valores entre procesos/segundos y
+                 * chocaban con listas existentes; jmn_crear_lista(id_existente) vacia count y
+                 * lista_poner falla silenciosamente -> .jbr cargaba pesos en ceros. */
+                if (s_list_counter < 0x0FFFFFFFu)
+                    s_list_counter++;
+                id = 0xF0000000u + s_list_counter;
             }
 
 #ifdef JASBOOT_LANG_INTEGRATION
@@ -7034,8 +7113,12 @@ int vm_step(VM* vm) {
         case OP_MEM_LISTA_AGREGAR: {
 #ifdef JASBOOT_LANG_INTEGRATION
             uint32_t list_id = (uint32_t)a_val;
-            JMNMemoria* m_target = (vm->mem_neuronal && jmn_lista_existe(vm->mem_neuronal, list_id))
-                                   ? vm->mem_neuronal : vm->mem_colecciones;
+            /* Colecciones primero: listas del programa viven en RAM; JMN puede tener otro id distinto. */
+            JMNMemoria* m_target = NULL;
+            if (vm->mem_colecciones && jmn_lista_existe(vm->mem_colecciones, list_id))
+                m_target = vm->mem_colecciones;
+            else if (vm->mem_neuronal && jmn_lista_existe(vm->mem_neuronal, list_id))
+                m_target = vm->mem_neuronal;
             if (!m_target) { ensure_jmn_col(vm); m_target = vm->mem_colecciones; }
             if (m_target) {
                 int ok_size = 0;
@@ -7088,8 +7171,11 @@ int vm_step(VM* vm) {
             uint32_t list_id = (uint32_t)b_val;
             uint32_t idx = (uint32_t)c_val;
 #ifdef JASBOOT_LANG_INTEGRATION
-            JMNMemoria* m_target = (vm->mem_neuronal && jmn_lista_existe(vm->mem_neuronal, list_id))
-                                   ? vm->mem_neuronal : vm->mem_colecciones;
+            JMNMemoria* m_target = NULL;
+            if (vm->mem_colecciones && jmn_lista_existe(vm->mem_colecciones, list_id))
+                m_target = vm->mem_colecciones;
+            else if (vm->mem_neuronal && jmn_lista_existe(vm->mem_neuronal, list_id))
+                m_target = vm->mem_neuronal;
             if (!m_target) { ensure_jmn_col(vm); m_target = vm->mem_colecciones; }
             if (m_target) {
                 if (jmn_lista_indice_fuera_de_rango(m_target, list_id, idx)) {
@@ -7139,11 +7225,15 @@ int vm_step(VM* vm) {
             uint32_t idx = (uint32_t)b_val;
             uint64_t reg_val = c_val;
 #ifdef JASBOOT_LANG_INTEGRATION
-            JMNMemoria* m_target = (vm->mem_neuronal && jmn_lista_existe(vm->mem_neuronal, list_id))
-                                   ? vm->mem_neuronal : vm->mem_colecciones;
+            JMNMemoria* m_target = NULL;
+            if (vm->mem_colecciones && jmn_lista_existe(vm->mem_colecciones, list_id))
+                m_target = vm->mem_colecciones;
+            else if (vm->mem_neuronal && jmn_lista_existe(vm->mem_neuronal, list_id))
+                m_target = vm->mem_neuronal;
             if (!m_target) { ensure_jmn_col(vm); m_target = vm->mem_colecciones; }
             if (m_target) {
-                JMNValor val; val.u = (uint32_t)reg_val;
+                JMNValor val;
+                val.u = (uint32_t)(reg_val & 0xFFFFFFFFu);
                 jmn_lista_poner(m_target, list_id, idx, val);
             }
 #endif
@@ -7190,7 +7280,13 @@ int vm_step(VM* vm) {
             if (!ok_size) {
                 int en_neuronal = (vm->mem_neuronal && jmn_lista_existe(vm->mem_neuronal, list_id_val));
                 int en_colecciones = (vm->mem_colecciones && jmn_lista_existe(vm->mem_colecciones, list_id_val));
-                JMNMemoria* m_target = en_neuronal ? vm->mem_neuronal : vm->mem_colecciones;
+                /* Misma prioridad que OP_MEM_LISTA_OBTENER / PONER: colecciones primero si existe,
+                 * para no mezclar tamano de un id con el contenido leido desde otra memoria. */
+                JMNMemoria* m_target = NULL;
+                if (en_colecciones)
+                    m_target = vm->mem_colecciones;
+                else if (en_neuronal)
+                    m_target = vm->mem_neuronal;
                 if (!m_target) { ensure_jmn_col(vm); m_target = vm->mem_colecciones; }
                 if (m_target) {
                     tam = (uint32_t)jmn_lista_tamano(m_target, list_id_val);
@@ -7929,6 +8025,19 @@ int vm_step(VM* vm) {
             // A = data_reg, B = handle_reg (opcional)
             uint64_t a_val = vm_get_register(vm, inst.operand_a);
             const char* data = vm_text_cache_get(vm, (uint32_t)a_val);
+            char data_buf[4096];
+            /* Si data no está en cache, puede ser offset en sección IR data (string literal). */
+            if (!data && vm->ir && vm->ir->data && (uint32_t)a_val < vm->ir->header.data_size) {
+                data = (const char*)(vm->ir->data + (uint32_t)a_val);
+            }
+#ifdef JASBOOT_LANG_INTEGRATION
+            /* Fallback final: resolver desde JMN por ID textual cuando no existe en cache. */
+            if (!data && vm->mem_neuronal) {
+                if (jmn_obtener_texto(vm->mem_neuronal, (uint32_t)a_val, data_buf, sizeof(data_buf)) >= 0) {
+                    data = data_buf;
+                }
+            }
+#endif
             FILE* f = (inst.flags & IR_INST_FLAG_B_REGISTER) ? (FILE*)(uintptr_t)vm_get_register(vm, inst.operand_b) : vm->current_file;
             
             if (data && f) {

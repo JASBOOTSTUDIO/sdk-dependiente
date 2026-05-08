@@ -1782,6 +1782,8 @@ static int warn_unused_functions(const char *in_path, const char *source_text, A
     for (size_t i = 0; i < p->n_funcs; i++) {
         FunctionNode *fn = (FunctionNode *)p->functions[i];
         if (!fn || !fn->name) continue;
+        /* Definida en otro .jasb fusionado con `usar`: no aplicar esta heuristica al unir AST */
+        if (fn->diag_source_unit) continue;
         if (fn->is_exported) continue;
         if (callee_vec_has(&callees, fn->name)) continue;
 
@@ -2182,12 +2184,24 @@ static int warn_unused_variables(const char *in_path, const char *source_text, A
     UnusedDeclVec decls = {0};
     int depth = 1;
 
-    for (size_t i = 0; i < p->n_globals; i++)
-        unused_scan_stmt(p->globals[i], &decls, &depth);
+    for (size_t i = 0; i < p->n_globals; i++) {
+        ASTNode *g = p->globals[i];
+        if (!g) continue;
+        if (g->type == NODE_VAR_DECL) {
+            VarDeclNode *vg = (VarDeclNode *)g;
+            if (vg->diag_source_unit) continue;
+        } else if (g->type == NODE_STRUCT_DEF) {
+            StructDefNode *sg = (StructDefNode *)g;
+            if (sg->diag_source_unit) continue;
+        }
+        unused_scan_stmt(g, &decls, &depth);
+    }
 
     for (size_t i = 0; i < p->n_funcs; i++) {
         FunctionNode *fn = (FunctionNode*)p->functions[i];
         if (!fn) continue;
+        /* Cuerpo/params pertenecen al modulo importado (lineas respecto a ese archivo) */
+        if (fn->diag_source_unit) continue;
         depth = 2;
         for (size_t j = 0; j < fn->n_params; j++) {
             VarDeclNode *vd = (VarDeclNode*)fn->params[j];

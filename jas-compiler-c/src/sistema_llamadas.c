@@ -66,7 +66,8 @@ const char *const SISTEMA_LLAMADAS[] = {
     "bytes_desde_texto", "bytes_a_texto", "dns_resolver",
     "tcp_conectar", "tcp_escuchar", "tcp_aceptar", "tcp_enviar", "tcp_recibir", "tcp_cerrar",
     "tls_cliente", "tls_servidor", "tls_enviar", "tls_recibir", "tls_cerrar",
-    "pausa_milisegundos", "esperar_milisegundos"
+    "pausa_milisegundos", "esperar_milisegundos",
+    "nativo_mlp_entrenar"
 };
 const size_t SISTEMA_LLAMADAS_COUNT = sizeof(SISTEMA_LLAMADAS) / sizeof(SISTEMA_LLAMADAS[0]);
 
