@@ -255,6 +255,7 @@ void jb_put_vec_mat_member(jb_var_t *v, const char *name, jb_var_t val);
 /* --- JMN ligero + persistencia texto --- */
 extern jb_var_t g_jmn_memoria;
 extern jb_var_t g_jmn_relaciones;
+extern jb_var_t g_jmn_secuencias; /* mapa nombre_contexto -> lista(texto) */
 
 jb_var_t jb_jmn_key_as_text(jb_var_t key);
 double jb_jmn_as_f64(jb_var_t v, double def);
@@ -283,6 +284,18 @@ void jb_consolidar_memoria(void);
 void jb_cerrar_memoria(void);
 jb_var_t jb_aprender_concepto(jb_var_t concepto, jb_var_t peso);
 
+jb_var_t jb_mem_obtener_fuerza(jb_var_t origen, jb_var_t destino);
+jb_var_t jb_reforzar_concepto(jb_var_t concepto, jb_var_t magnitud);
+jb_var_t jb_penalizar_concepto(jb_var_t concepto, jb_var_t magnitud);
+jb_var_t jb_olvidar_debiles(jb_var_t umbral);
+
+jb_var_t jb_asociar_secuencia_solo(jb_var_t lista);
+jb_var_t jb_asociar_secuencia(jb_var_t a, jb_var_t b);
+jb_var_t jb_obtener_secuencia(jb_var_t contexto);
+jb_var_t jb_pensar_siguiente(jb_var_t paso, jb_var_t contexto_opt);
+jb_var_t jb_pensar_anterior(jb_var_t paso, jb_var_t contexto_opt);
+jb_var_t jb_corregir_secuencia(jb_var_t anterior, jb_var_t incorrecto, jb_var_t correcto);
+
 jb_var_t jb_recordar_stub(jb_var_t key, jb_var_t val);
 jb_var_t jb_buscar_stub(jb_var_t key);
 jb_var_t jb_crear_memoria_stub(jb_var_t path);
@@ -301,7 +314,6 @@ void jb_imprimir_id(jb_var_t idv);
 jb_var_t jb_propiedad_concepto(jb_var_t concepto, jb_var_t prop);
 jb_var_t jb_asociar_relacion(jb_var_t a, jb_var_t b, jb_var_t fuerza);
 jb_var_t jb_asociar_similitud(jb_var_t a, jb_var_t b, jb_var_t fuerza);
-jb_var_t jb_asociar_secuencia(jb_var_t a, jb_var_t b, jb_var_t fuerza);
 jb_var_t jb_asociar_diferencia(jb_var_t a, jb_var_t b, jb_var_t fuerza);
 jb_var_t jb_comparar_patrones(jb_var_t a, jb_var_t b);
 jb_var_t jb_buscar_en_memoria(jb_var_t termino);

@@ -309,6 +309,9 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != OP_MEM_ES_VARIABLE_SISTEMA &&
             inst.opcode != OP_MEM_CONTIENE_TEXTO_REG &&
             inst.opcode != OP_MEM_TERMINA_CON_REG &&
+            inst.opcode != OP_MEM_OBTENER_SECUENCIA &&
+            inst.opcode != OP_MEM_PROPAGAR_ACTIVACION &&
+            inst.opcode != OP_MEM_DECAE_CONEXIONES &&
             inst.opcode != OP_MEM_OBTENER_TODOS &&
             inst.opcode != OP_FS_LISTAR &&
             inst.opcode != OP_FS_BORRAR &&
@@ -340,7 +343,9 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != OP_MEM_COMPARAR_PATRONES &&
             inst.opcode != OP_MEM_BUSCAR_ASOCIADOS &&
             inst.opcode != OP_MEM_BUSCAR_ASOCIADOS_LISTA &&
+            inst.opcode != OP_MEM_BUSCAR_MAPA_ASOCIADOS &&
             inst.opcode != OP_MEM_OBTENER_VALOR &&
+            inst.opcode != OP_MEM_MAPA_LLAVES &&
             inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA &&
             inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA_LISTA &&
             inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA_CS &&

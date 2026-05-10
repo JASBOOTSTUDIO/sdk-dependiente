@@ -499,6 +499,7 @@ static int jmn_callback_recolectar_ids(JMNNodo* nodo, void* user_data) {
 typedef struct {
     uint32_t target_id;
     uint32_t found_id;
+    uint32_t tipo_rel;
     JMNMemoria* mem;
 } JMNBusquedaPadreCtx;
 
@@ -508,11 +509,8 @@ static int jmn_callback_buscar_padre_secuencia(JMNNodo* nodo, void* user_data) {
     JMNConexion* conns = jmn_obtener_conexiones(ctx->mem, nodo, &count);
     
     for (uint32_t i = 0; i < count; i++) {
-        // Chequear si apunta al target Y es de tipo SECUENCIA
-        // Nota: key_id almacena el tipo de relacion si < 100 o flags
-        // Asumimos JMN_RELACION_SECUENCIA = 3
         if (conns[i].destino_id == ctx->target_id) {
-             if (conns[i].key_id == JMN_RELACION_SECUENCIA) {
+             if (conns[i].key_id == ctx->tipo_rel) {
                  ctx->found_id = nodo->id;
                  return 1; // Stop iteration
              }
@@ -4137,7 +4135,20 @@ int vm_step(VM* vm) {
             /* Misma resolución que buscar/imprimir: texto puede estar solo en caché VM
              * (p. ej. literal reciente) sin fila JMN; jmn_obtener_texto solo fallaba y dejaba el id crudo. */
             char buf[1024];
+            int found = 0;
+            
             if (vm_text_cache_get_copy(vm, id, buf, sizeof(buf)) && buf[0]) {
+                found = 1;
+            } 
+#ifdef JASBOOT_LANG_INTEGRATION
+            else if (vm->mem_neuronal && jmn_obtener_texto(vm->mem_neuronal, id, buf, sizeof(buf)) >= 0 && buf[0]) {
+                found = 1;
+                // Sincronizar con el cache de la VM para futuras consultas
+                vm_text_cache_put(vm, id, buf);
+            }
+#endif
+
+            if (found) {
                 uint32_t tid = vm_alloc_runtime_text_id(vm);
                 char* owned = strdup(buf);
                 if (owned) {
@@ -7034,6 +7045,7 @@ int vm_step(VM* vm) {
 #endif
             // Convertir float a bits para registro (union cast)
             union { float f; uint64_t u; } cast;
+            cast.u = 0; // Limpiar bits altos
             cast.f = fuerza;
             vm_set_register(vm, inst.operand_a, cast.u);
             vm->pc += IR_INSTRUCTION_SIZE;
@@ -7380,40 +7392,95 @@ int vm_step(VM* vm) {
         }
 
         case OP_STR_ASOCIAR_SECUENCIA: {
-            uint32_t concept_id = (uint32_t)a_val;
-            uint32_t list_id_val = (uint32_t)b_val;
+            uint32_t id_a = (uint32_t)a_val;
+            uint32_t id_b = (uint32_t)b_val;
 #ifdef JASBOOT_LANG_INTEGRATION
-            if (vm->mem_neuronal && concept_id != 0) {
+            if (vm->mem_neuronal) {
                 JMNMemoria* mem_neu = vm->mem_neuronal;
-                JMNMemoria* mem_src = NULL;
-                uint32_t count = 0;
                 
-                if (vm->mem_colecciones) {
-                    count = jmn_lista_tamano(vm->mem_colecciones, list_id_val);
-                    if (count > 0) mem_src = vm->mem_colecciones;
-                }
-                if (!mem_src) {
-                    count = jmn_lista_tamano(mem_neu, list_id_val);
-                    if (count > 0) mem_src = mem_neu;
+                // Determinar si A y B son listas
+                int a_es_lista = 0;
+                uint32_t a_count = 0;
+                JMNMemoria* a_mem_src = NULL;
+                
+                if (id_a != 0) {
+                    if (vm->mem_colecciones) {
+                        a_count = jmn_lista_tamano(vm->mem_colecciones, id_a);
+                        if (a_count > 0) { a_es_lista = 1; a_mem_src = vm->mem_colecciones; }
+                    }
+                    if (!a_es_lista) {
+                        a_count = jmn_lista_tamano(mem_neu, id_a);
+                        if (a_count > 0) { a_es_lista = 1; a_mem_src = mem_neu; }
+                    }
                 }
 
-                if (mem_src && count > 0) {
-                    uint32_t* ids = (uint32_t*)malloc(sizeof(uint32_t) * count);
-                    if (ids) {
-                        for (uint32_t i = 0; i < count; i++) {
-                            JMNValor v_val_l = jmn_lista_obtener(mem_src, list_id_val, i);
-                            ids[i] = v_val_l.u;
-                        }
-                        for (uint32_t i = 0; i < count; i++) {
-                            JMNValor v_uno = { .f = 1.0f };
-                            jmn_agregar_conexion(mem_neu, concept_id, ids[i], v_uno, JMN_RELACION_PATRON);
-                            if (i < count - 1) {
-                                uint32_t rel_sec = jmn_relacion_con_contexto(JMN_RELACION_SECUENCIA, concept_id);
-                                jmn_agregar_conexion(mem_neu, ids[i], ids[i+1], v_uno, rel_sec);
-                            }
-                        }
-                        free(ids);
+                int b_es_lista = 0;
+                uint32_t b_count = 0;
+                JMNMemoria* b_mem_src = NULL;
+                
+                if (id_b != 0) {
+                    if (vm->mem_colecciones) {
+                        b_count = jmn_lista_tamano(vm->mem_colecciones, id_b);
+                        if (b_count > 0) { b_es_lista = 1; b_mem_src = vm->mem_colecciones; }
                     }
+                    if (!b_es_lista) {
+                        b_count = jmn_lista_tamano(mem_neu, id_b);
+                        if (b_count > 0) { b_es_lista = 1; b_mem_src = mem_neu; }
+                    }
+                }
+
+                JMNValor v_uno = { .f = 1.0f };
+
+                // Asegurar que los nodos ID_A e ID_B existan
+                if (id_a != 0 && !jmn_obtener_nodo(mem_neu, id_a)) jmn_agregar_nodo(mem_neu, id_a, v_uno);
+                if (id_b != 0 && !jmn_obtener_nodo(mem_neu, id_b)) jmn_agregar_nodo(mem_neu, id_b, v_uno);
+
+                // CASO 1: asociar_secuencia(lista) -> id_a == 0, id_b es lista
+                if (id_a == 0 && b_es_lista) {
+                    for (uint32_t i = 0; i < b_count - 1; i++) {
+                        uint32_t cur = jmn_lista_obtener(b_mem_src, id_b, i).u;
+                        uint32_t nxt = jmn_lista_obtener(b_mem_src, id_b, i+1).u;
+                        if (!jmn_obtener_nodo(mem_neu, cur)) jmn_agregar_nodo(mem_neu, cur, v_uno);
+                        if (!jmn_obtener_nodo(mem_neu, nxt)) jmn_agregar_nodo(mem_neu, nxt, v_uno);
+                        jmn_agregar_conexion(mem_neu, cur, nxt, v_uno, JMN_RELACION_SECUENCIA);
+                    }
+                }
+                // CASO 2: asociar_secuencia(concepto, lista) -> id_a es concepto, id_b es lista
+                else if (!a_es_lista && b_es_lista) {
+                    for (uint32_t i = 0; i < b_count; i++) {
+                        uint32_t item = jmn_lista_obtener(b_mem_src, id_b, i).u;
+                        if (!jmn_obtener_nodo(mem_neu, item)) jmn_agregar_nodo(mem_neu, item, v_uno);
+                        
+                        jmn_agregar_conexion(mem_neu, id_a, item, v_uno, JMN_RELACION_PATRON);
+                        if (i < b_count - 1) {
+                            uint32_t nxt = jmn_lista_obtener(b_mem_src, id_b, i+1).u;
+                            if (!jmn_obtener_nodo(mem_neu, nxt)) jmn_agregar_nodo(mem_neu, nxt, v_uno);
+                            
+                            // Asociación general
+                            jmn_agregar_conexion(mem_neu, item, nxt, v_uno, JMN_RELACION_SECUENCIA);
+                            // Asociación con contexto
+                            uint32_t rel_sec = jmn_relacion_con_contexto(JMN_RELACION_SECUENCIA, id_a);
+                            jmn_agregar_conexion(mem_neu, item, nxt, v_uno, rel_sec);
+                        }
+                    }
+                }
+                // CASO 3: asociar_secuencia(lista, concepto) -> id_a es lista, id_b es concepto
+                else if (a_es_lista && !b_es_lista) {
+                    uint32_t last_item = jmn_lista_obtener(a_mem_src, id_a, a_count - 1).u;
+                    if (!jmn_obtener_nodo(mem_neu, last_item)) jmn_agregar_nodo(mem_neu, last_item, v_uno);
+                    
+                    jmn_agregar_conexion(mem_neu, last_item, id_b, v_uno, JMN_RELACION_SECUENCIA);
+                    jmn_agregar_conexion(mem_neu, id_a, id_b, v_uno, JMN_RELACION_PATRON);
+                }
+                // CASO 4: asociar_secuencia(listaA, listaB) -> Ambas son listas
+                else if (a_es_lista && b_es_lista) {
+                    uint32_t last_a = jmn_lista_obtener(a_mem_src, id_a, a_count - 1).u;
+                    uint32_t first_b = jmn_lista_obtener(b_mem_src, id_b, 0).u;
+                    if (!jmn_obtener_nodo(mem_neu, last_a)) jmn_agregar_nodo(mem_neu, last_a, v_uno);
+                    if (!jmn_obtener_nodo(mem_neu, first_b)) jmn_agregar_nodo(mem_neu, first_b, v_uno);
+                    
+                    jmn_agregar_conexion(mem_neu, last_a, first_b, v_uno, JMN_RELACION_SECUENCIA);
+                    jmn_agregar_conexion(mem_neu, id_a, id_b, v_uno, JMN_RELACION_PATRON);
                 }
             }
 #endif
@@ -7830,6 +7897,57 @@ int vm_step(VM* vm) {
             break;
         }
 
+        case OP_MEM_OBTENER_SECUENCIA: {
+            uint32_t context_id = (uint32_t)vm_get_register(vm, inst.operand_b);
+            uint32_t lista_id = 0;
+#ifdef JASBOOT_LANG_INTEGRATION
+            if (vm->mem_neuronal && context_id != 0) {
+                JMNMemoria* mem = vm->mem_neuronal;
+                JMNBusquedaResultado asoc[64];
+                int n = jmn_buscar_asociaciones(mem, context_id, JMN_RELACION_PATRON, 0.01f, 1, asoc, 64);
+                
+                uint32_t inicio = 0;
+                uint32_t tipo_sec_ctx = jmn_relacion_con_contexto(JMN_RELACION_SECUENCIA, context_id);
+
+                // Buscar el nodo que no tiene anterior en este contexto
+                for (int i = 0; i < n; i++) {
+                    JMNBusquedaPadreCtx pctx;
+                    pctx.target_id = asoc[i].id;
+                    pctx.found_id = 0;
+                    pctx.tipo_rel = tipo_sec_ctx;
+                    pctx.mem = mem;
+                    jmn_iterar_nodos(mem, jmn_callback_buscar_padre_secuencia, &pctx);
+                    if (pctx.found_id == 0) {
+                        inicio = asoc[i].id;
+                        break;
+                    }
+                }
+
+                if (inicio != 0) {
+                    lista_id = 0x5EC00000 | (context_id & 0xFFFFFF);
+                    jmn_crear_lista(mem, lista_id);
+                    jmn_vector_limpiar(mem, lista_id);
+                    
+                    uint32_t actual = inicio;
+                    int safety = 0;
+                    while (actual != 0 && safety < 100) {
+                        JMNValor v; v.u = actual;
+                        jmn_lista_agregar(mem, lista_id, v);
+                        
+                        JMNBusquedaResultado res_nxt[1];
+                        int found = jmn_buscar_asociaciones(mem, actual, tipo_sec_ctx, 0.01f, 1, res_nxt, 1);
+                        if (found > 0) actual = res_nxt[0].id;
+                        else actual = 0;
+                        safety++;
+                    }
+                }
+            }
+#endif
+            vm_set_register(vm, inst.operand_a, (uint64_t)lista_id);
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+
         case OP_MEM_PROPAGAR_ACTIVACION: {
 #ifdef JASBOOT_LANG_INTEGRATION
             if (vm->mem_neuronal) {
@@ -7907,7 +8025,21 @@ int vm_step(VM* vm) {
                 if (tipo_relacion > JMN_RELACION_MAX) tipo_relacion = 0;
                 if (K == 0 || K > 64) K = 16;
                 JMNBusquedaResultado resultados[64];
-                int n = jmn_buscar_asociaciones(vm->mem_neuronal, origen_id, tipo_relacion, 0.1f, 2, resultados, (uint16_t)K);
+                int n = jmn_buscar_asociaciones(vm->mem_neuronal, origen_id, tipo_relacion, 0.01f, 1, resultados, (uint16_t)K);
+                
+                // Ordenar por fuerza descendente
+                if (n > 1) {
+                    for (int i = 0; i < n - 1; i++) {
+                        for (int j = i + 1; j < n; j++) {
+                            if (resultados[j].fuerza > resultados[i].fuerza) {
+                                JMNBusquedaResultado temp = resultados[i];
+                                resultados[i] = resultados[j];
+                                resultados[j] = temp;
+                            }
+                        }
+                    }
+                }
+
                 if (getenv("JASBOOT_DEBUG")) {
                     fprintf(stderr, "[VM OP_MEM_BUSCAR_ASOCIADOS_LISTA] origen=%u tipo=%u K=%u umbral=0.1 -> n=%d resultados\n",
                             origen_id, tipo_relacion, K, n);
@@ -7936,6 +8068,71 @@ int vm_step(VM* vm) {
                     }
                 }
                 vm_set_register(vm, inst.operand_a, (uint64_t)list_id);
+            } else {
+                vm_set_register(vm, inst.operand_a, 0);
+            }
+#else
+            vm_set_register(vm, inst.operand_a, 0);
+#endif
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+
+        case 0x3F: { // OP_MEM_BUSCAR_MAPA_ASOCIADOS
+            // A <- mapa {concepto: [asociados...]} 
+            // B = lista_origen, C = (max_p*100 << 8) | min_p*100
+#ifdef JASBOOT_LANG_INTEGRATION
+            if (vm->mem_neuronal || vm->mem_colecciones) {
+                uint32_t list_id = (uint32_t)vm_get_register(vm, inst.operand_b);
+                uint64_t c_val = vm_get_register(vm, inst.operand_c);
+                float min_p = (float)(c_val & 0xFF) / 100.0f;
+                float max_p = (float)((c_val >> 8) & 0xFF) / 100.0f;
+                if (max_p == 0.0f) max_p = 1.0f;
+
+                if (getenv("JASBOOT_DEBUG")) {
+                    fprintf(stderr, "[VM] BUSCAR_MAPA_ASOCIADOS list=%u min=%.2f max=%.2f\n", list_id, min_p, max_p);
+                }
+
+                uint32_t map_id = vm_alloc_runtime_text_id(vm); // Usar ID temporal para mapa
+                ensure_jmn_col(vm);
+                jmn_crear_mapa(vm->mem_colecciones, map_id);
+
+                JMNMemoria* m_src = (vm->mem_neuronal && jmn_lista_existe(vm->mem_neuronal, list_id)) ? vm->mem_neuronal : vm->mem_colecciones;
+                uint32_t n_items = jmn_lista_tamano(m_src, list_id);
+                for (uint32_t i = 0; i < n_items; i++) {
+                    uint32_t concept_id = jmn_lista_obtener(m_src, list_id, i).u;
+                    if (concept_id == 0) continue;
+
+                    JMNBusquedaResultado resultados[32];
+                    // Profundidad 1 para ser rápido y preciso según el pedido
+                    int n_asoc = jmn_buscar_asociaciones(vm->mem_neuronal, concept_id, 0, min_p, 1, resultados, 32);
+                    
+                    if (getenv("JASBOOT_DEBUG")) {
+                        fprintf(stderr, "  Concepto %u -> n_asoc=%d\n", concept_id, n_asoc);
+                    }
+
+                    if (n_asoc > 0) {
+                        uint32_t sub_list_id = vm_alloc_runtime_text_id(vm);
+                        jmn_crear_lista(vm->mem_colecciones, sub_list_id);
+                        
+                        int count = 0;
+                        for (int j = 0; j < n_asoc; j++) {
+                            if (resultados[j].fuerza <= max_p) {
+                                JMNValor v; v.u = resultados[j].id;
+                                jmn_lista_agregar(vm->mem_colecciones, sub_list_id, v);
+                                count++;
+                            }
+                        }
+                        
+                        if (count > 0) {
+                            JMNValor v_list; v_list.u = sub_list_id;
+                            jmn_mapa_insertar(vm->mem_colecciones, map_id, concept_id, v_list);
+                        } else {
+                            jmn_lista_liberar(vm->mem_colecciones, sub_list_id);
+                        }
+                    }
+                }
+                vm_set_register(vm, inst.operand_a, (uint64_t)map_id);
             } else {
                 vm_set_register(vm, inst.operand_a, 0);
             }
@@ -8289,14 +8486,34 @@ int vm_step(VM* vm) {
 
     case OP_MEM_PENSAR_SIGUIENTE: {
         uint64_t b_val = vm_get_register(vm, inst.operand_b);
+        uint32_t context_id = 0;
+        if (inst.flags & IR_INST_FLAG_C_REGISTER) {
+            context_id = (uint32_t)vm_get_register(vm, inst.operand_c);
+        }
 #ifdef JASBOOT_LANG_INTEGRATION
         if (vm->mem_neuronal) {
             JMNMemoria* mem = vm->mem_neuronal;
             JMNBusquedaResultado resultados[8];
-            int n = jmn_buscar_asociaciones(mem, (uint32_t)b_val, JMN_RELACION_SECUENCIA, 0.1f, 1, resultados, 8);
+            uint32_t tipo = JMN_RELACION_SECUENCIA;
+            if (context_id != 0) tipo = jmn_relacion_con_contexto(tipo, context_id);
+
+            int n = jmn_buscar_asociaciones(mem, (uint32_t)b_val, tipo, 0.01f, 1, resultados, 8);
+            if (n > 1) {
+                // Ordenar resultados por fuerza (descendente)
+                for (int i = 0; i < n - 1; i++) {
+                    for (int j = i + 1; j < n; j++) {
+                        if (resultados[j].fuerza > resultados[i].fuerza) {
+                            JMNBusquedaResultado temp = resultados[i];
+                            resultados[i] = resultados[j];
+                            resultados[j] = temp;
+                        }
+                    }
+                }
+            }
+            if (getenv("JASBOOT_DEBUG")) fprintf(stderr, "[VM] PENSAR_SIGUIENTE origen=%u tipo=%u n=%d\n", (uint32_t)b_val, tipo, n);
             if (n <= 0) {
                 if (vm->mem_colecciones) {
-                    n = jmn_buscar_asociaciones(vm->mem_colecciones, (uint32_t)b_val, JMN_RELACION_SECUENCIA, 0.1f, 1, resultados, 8);
+                    n = jmn_buscar_asociaciones(vm->mem_colecciones, (uint32_t)b_val, tipo, 0.01f, 1, resultados, 8);
                 }
                 
                 if (n > 0) {
@@ -8315,14 +8532,24 @@ int vm_step(VM* vm) {
         break;
     }
 
-    case OP_MEM_PENSAR_ANTERIOR:
+    case OP_MEM_PENSAR_ANTERIOR: {
+        uint64_t b_val = vm_get_register(vm, inst.operand_b);
+        uint32_t context_id = 0;
+        if (inst.flags & IR_INST_FLAG_C_REGISTER) {
+            context_id = (uint32_t)vm_get_register(vm, inst.operand_c);
+        }
+
 #ifdef JASBOOT_LANG_INTEGRATION
         if (vm->mem_neuronal) {
-             uint64_t b_val = vm_get_register(vm, inst.operand_b);
              JMNMemoria* mem = vm->mem_neuronal;
+             uint32_t tipo = JMN_RELACION_SECUENCIA;
+             if (context_id != 0) tipo = jmn_relacion_con_contexto(tipo, context_id);
+
+             if (getenv("JASBOOT_DEBUG")) fprintf(stderr, "[VM] PENSAR_ANTERIOR target=%u tipo=%u\n", (uint32_t)b_val, tipo);
              JMNBusquedaPadreCtx ctx;
              ctx.target_id = (uint32_t)b_val;
              ctx.found_id = 0;
+             ctx.tipo_rel = tipo;
              ctx.mem = mem;
              jmn_iterar_nodos(mem, jmn_callback_buscar_padre_secuencia, &ctx);
              vm_set_register(vm, inst.operand_a, (uint64_t)ctx.found_id);
@@ -8332,6 +8559,7 @@ int vm_step(VM* vm) {
 #endif
         vm->pc += IR_INSTRUCTION_SIZE;
         break;
+    }
 
     case 0xC6: { // OP_MEM_CORREGIR_SECUENCIA
         // A = anterior, B = incorrecto, C = correcto
@@ -8345,11 +8573,10 @@ int vm_step(VM* vm) {
             uint32_t id_cor = (uint32_t)c_val;
             
             // 1. Penalizar relación antigua
-            JMNValor v_penal = { .f = -0.5f };
-            jmn_agregar_conexion(vm->mem_neuronal, id_ant, id_inc, v_penal, JMN_RELACION_SECUENCIA);
+            jmn_penalizar_asociacion(vm->mem_neuronal, id_ant, id_inc, 0.5f);
             
             // 2. Reforzar relación correcta
-            JMNValor v_cor = { .f = 1.0f };
+            JMNValor v_cor = { .f = 0.5f };
             jmn_agregar_conexion(vm->mem_neuronal, id_ant, id_cor, v_cor, JMN_RELACION_SECUENCIA);
         }
 #endif
@@ -8383,6 +8610,10 @@ int vm_step(VM* vm) {
 
             if (tipo > 0 && tipo <= JMN_RELACION_MAX) {
                 JMNValor v_peso = { .f = peso };
+                if (getenv("JASBOOT_DEBUG")) {
+                    fprintf(stderr, "[VM] AGREGANDO CONEXION id1=%u id2=%u tipo=%u peso=%.4f\n", 
+                            id1, id2, tipo, peso);
+                }
                 jmn_agregar_conexion(vm->mem_neuronal, id1, id2, v_peso, tipo);
                 if (tipo == JMN_RELACION_SIMILITUD || tipo == JMN_RELACION_OPOSICION) {
                     jmn_agregar_conexion(vm->mem_neuronal, id2, id1, v_peso, tipo);

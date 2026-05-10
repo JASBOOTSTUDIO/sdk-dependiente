@@ -17,13 +17,15 @@ static uint32_t alloc_conex_slot(JMNMemoria* mem, uint32_t ori, uint32_t dest) {
     return slot;
 }
 
-static uint32_t find_conex_slot(JMNMemoria* mem, uint32_t ori, uint32_t dest) {
+static uint32_t find_conex_slot(JMNMemoria* mem, uint32_t ori, uint32_t dest, uint32_t tipo) {
     uint32_t bucket = ori % (mem->cap_nodos + 1);
     if (bucket > mem->cap_nodos) bucket = mem->cap_nodos;
     uint32_t slot = mem->cabeza_origen[bucket];
     while (slot != 0xFFFFFFFF) {
-        if (mem->conexiones[slot].origen_id == ori && mem->conexiones[slot].destino_id == dest)
-            return slot;
+        if (mem->conexiones[slot].origen_id == ori && mem->conexiones[slot].destino_id == dest) {
+            if (tipo == 0 || mem->conexiones[slot].key_id == tipo)
+                return slot;
+        }
         slot = mem->conexiones[slot].next_origen;
     }
     return 0xFFFFFFFF;
@@ -61,13 +63,17 @@ static void unlink_conexion_origen(JMNMemoria* mem, uint32_t slot) {
 
 void jmn_agregar_conexion(JMNMemoria* mem, uint32_t origen, uint32_t dest, JMNValor fuerza, uint32_t tipo) {
     if (!mem || origen == 0 || dest == 0) return;
-    uint32_t slot = find_conex_slot(mem, origen, dest);
+    uint32_t slot = find_conex_slot(mem, origen, dest, tipo);
     if (slot != 0xFFFFFFFF) {
         mem->conexiones[slot].fuerza.f += fuerza.f;
+        if (mem->conexiones[slot].fuerza.f > 1.0f) mem->conexiones[slot].fuerza.f = 1.0f;
+        if (mem->conexiones[slot].fuerza.f < 0.0f) mem->conexiones[slot].fuerza.f = 0.0f;
         mem->conexiones[slot].key_id = tipo;
     } else {
         slot = alloc_conex_slot(mem, origen, dest);
         mem->conexiones[slot].fuerza = fuerza;
+        if (mem->conexiones[slot].fuerza.f > 1.0f) mem->conexiones[slot].fuerza.f = 1.0f;
+        if (mem->conexiones[slot].fuerza.f < 0.0f) mem->conexiones[slot].fuerza.f = 0.0f;
         mem->conexiones[slot].key_id = tipo;
     }
     if (!mem->es_ram) mem->dirty = 1;
@@ -94,7 +100,7 @@ JMNConexion* jmn_obtener_conexiones(JMNMemoria* mem, JMNNodo* nodo, uint32_t* co
 }
 
 void jmn_penalizar_asociacion(JMNMemoria* mem, uint32_t id_a, uint32_t id_b, float delta) {
-    uint32_t slot = find_conex_slot(mem, id_a, id_b);
+    uint32_t slot = find_conex_slot(mem, id_a, id_b, 0); // Penalizar la conexión más fuerte o cualquiera
     if (slot != 0xFFFFFFFF && mem->conexiones[slot].fuerza.f > 0.01f) {
         mem->conexiones[slot].fuerza.f -= delta;
         if (mem->conexiones[slot].fuerza.f < 0) mem->conexiones[slot].fuerza.f = 0;
@@ -103,7 +109,7 @@ void jmn_penalizar_asociacion(JMNMemoria* mem, uint32_t id_a, uint32_t id_b, flo
 }
 
 float jmn_obtener_fuerza_asociacion(JMNMemoria* mem, uint32_t id1, uint32_t id2) {
-    uint32_t slot = find_conex_slot(mem, id1, id2);
+    uint32_t slot = find_conex_slot(mem, id1, id2, 0); // 0 = cualquier tipo
     if (slot != 0xFFFFFFFF) return mem->conexiones[slot].fuerza.f;
     return 0.0f;
 }

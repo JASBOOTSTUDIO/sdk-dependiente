@@ -21,7 +21,7 @@
 #define IR_INST_FLAG_RELATIVE    (1 << 3)
 #define IR_INST_FLAG_A_REGISTER  (1 << 6)
 #define IR_INST_FLAG_B_REGISTER  (1 << 7)
-#define IR_INST_FLAG_C_REGISTER  0x00
+#define IR_INST_FLAG_C_REGISTER (1 << 5)
 
 #define OP_HALT           0x00
 #define OP_MEM_PENALIZAR  0x0E /* VM legacy: penalizar asociación (no confundir con MAPA_BORRAR 0xE3) */
@@ -159,6 +159,7 @@
 #define OP_HEAP_RESERVAR  0x45      /* A <- reservar(B bytes) */
 #define OP_HEAP_LIBERAR   0x46      /* liberar(A) */
 #define OP_ID_A_TEXTO     0x48      /* A <- Texto del ID B */
+#define OP_MEM_OBTENER_SECUENCIA 0x4D
 
 #define OP_IMPRIMIR_TEXTO 0x5B
 #define OP_STR_REGISTRAR_LITERAL 0xE4
@@ -182,8 +183,9 @@
 #define OP_STR_COPIAR          0x51
 #define OP_MEM_APRENDER_PESO_REG 0xE7
 #define OP_MEM_OBTENER_VALOR   0xCB
-#define OP_MEM_DECAE_CONEXIONES 0xCC
-#define OP_MEM_PROPAGAR_ACTIVACION 0xCD
+#define OP_MEM_BUSCAR_INTROSPECTIVA 0xCC
+#define OP_MEM_DECAE_CONEXIONES 0xCD
+#define OP_MEM_PROPAGAR_ACTIVACION 0xCE
 #define OP_IO_INPUT_REG        0xE5
 #define OP_IO_PERCIBIR_TECLADO 0x6C
 #define OP_IO_ENTRADA_FLOTANTE 0x8E
@@ -267,6 +269,7 @@
 #define OP_MEM_COMPARAR_PATRONES    0xC8
 #define OP_MEM_BUSCAR_ASOCIADOS     0xC9
 #define OP_MEM_BUSCAR_ASOCIADOS_LISTA 0xCA
+#define OP_MEM_BUSCAR_MAPA_ASOCIADOS  0x3F
 #define OP_MEM_PROCESAR_TEXTO         0xDE
 #define OP_MEM_PENSAR                 0xDF
 

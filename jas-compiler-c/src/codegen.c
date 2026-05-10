@@ -3610,6 +3610,12 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
              IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_C_IMMEDIATE);
         return 1;
     }
+    if (strcmp(name, "olvidar") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 1);
+        emit(cg, OP_MEM_PENALIZAR_CONCEPTO, 1, 0, 100, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_C_IMMEDIATE);
+        return 1;
+    }
     if (strcmp(name, "ventana_percepcion") == 0 || strcmp(name, "flujo_temporal") == 0) {
         int cap = 64;
         if (cn->n_args >= 1 && ARG0 && is_node(ARG0, NODE_LITERAL) &&
@@ -3799,12 +3805,43 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         return 1;
     }
     if (strcmp(name, "asociar_relacion") == 0) {
+        if (getenv("JASBOOT_DEBUG")) fprintf(stderr, "[CODEGEN] Generando asociar_relacion n_args=%d\n", cn->n_args);
         if (cn->n_args < 3) return 0;
         visit_expression(cg, ARG0, 1);
         visit_expression(cg, ARG1, 2);
-        visit_expression(cg, ARG2, 3);
-        emit(cg, OP_MEM_ASOCIAR_RELACION, 1, 2, 3,
-             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+        
+        if (cn->n_args >= 4) {
+            visit_expression(cg, ARG2, 3); // tipo
+            
+            if (is_node(ARG3, NODE_LITERAL) && ((LiteralNode*)ARG3)->is_float) {
+                float f = (float)((LiteralNode*)ARG3)->value.f;
+                uint32_t p1000 = (uint32_t)(f * 1000.0f);
+                if (getenv("JASBOOT_DEBUG")) fprintf(stderr, "  Literal float: %.4f -> p1000=%u\n", f, p1000);
+                // Empaquetar en registro 4: (p1000 << 8) | tipo_reg
+                emit(cg, OP_MOVER, 5, p1000 & 0xFF, (p1000 >> 8) & 0xFF, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+                emit(cg, OP_MOVER, 6, 8, 0, IR_INST_FLAG_B_IMMEDIATE);
+                emit(cg, OP_BIT_SHL, 5, 5, 6, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+                emit(cg, OP_SUMAR, 4, 5, 3, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+                emit(cg, OP_MEM_ASOCIAR_RELACION, 1, 2, 4, 
+                     IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+            } else {
+                if (getenv("JASBOOT_DEBUG")) fprintf(stderr, "  Argumento no literal o no float\n");
+                visit_expression(cg, ARG3, 4); // peso (variable)
+                emit(cg, OP_MOVER, 15, 1000 & 0xFF, (1000 >> 8) & 0xFF, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+                emit(cg, OP_CONV_I2F, 16, 15, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER); // 16 = 1000.0f
+                emit(cg, OP_MULTIPLICAR_FLT, 17, 4, 16, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+                emit(cg, OP_CONV_F2I, 18, 17, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER); // 18 = (int)1000*peso
+                emit(cg, OP_MOVER, 19, 8, 0, IR_INST_FLAG_B_IMMEDIATE);
+                emit(cg, OP_BIT_SHL, 20, 18, 19, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+                emit(cg, OP_SUMAR, 21, 20, 3, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+                emit(cg, OP_MEM_ASOCIAR_RELACION, 1, 2, 21, 
+                     IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+            }
+        } else {
+            visit_expression(cg, ARG2, 3);
+            emit(cg, OP_MEM_ASOCIAR_RELACION, 1, 2, 3,
+                 IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+        }
         return 1;
     }
     if (strcmp(name, "corregir_secuencia") == 0) {
@@ -3813,6 +3850,31 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         visit_expression(cg, ARG1, 2);
         emit(cg, OP_MEM_CORREGIR_SECUENCIA, 1, 2, 0,
              IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "buscar_asociados_rango") == 0) {
+        if (cn->n_args < 3) return 0;
+        visit_expression(cg, ARG0, 10); /* lista */
+        visit_expression(cg, ARG1, 11); /* min_p */
+        visit_expression(cg, ARG2, 12); /* max_p */
+        
+        /* Escalar min/max (0-100) y empaquetar */
+        emit(cg, OP_MOVER, 22, 100, 0, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+        emit(cg, OP_CONV_I2F, 23, 22, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER); // 23 = 100.0f
+        emit(cg, OP_MULTIPLICAR_FLT, 24, 11, 23, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER); /* 24 = min_p * 100 (flt) */
+        emit(cg, OP_MULTIPLICAR_FLT, 25, 12, 23, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER); /* 25 = max_p * 100 (flt) */
+        
+        emit(cg, OP_CONV_F2I, 26, 24, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER); // 26 = (int)min_p*100
+        emit(cg, OP_CONV_F2I, 27, 25, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER); // 27 = (int)max_p*100
+
+        emit(cg, OP_MOVER, 28, 8, 0, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
+        emit(cg, OP_BIT_SHL, 29, 27, 28, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER); /* 29 = max_p*100 << 8 */
+        emit(cg, OP_SUMAR, 30, 29, 26, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);   /* 30 = empaquetado */
+        
+        emit(cg, OP_MEM_BUSCAR_MAPA_ASOCIADOS, 1, 10, 30, 
+             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+        codegen_emit_write_resultado(cg, 1);
+        emit(cg, OP_MOVER, (uint8_t)dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
         return 1;
     }
     if (strcmp(name, "comparar_patrones") == 0) {
@@ -3996,25 +4058,44 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         return 1;
     }
     if (strcmp(name, "asociar_secuencia") == 0) {
-        if (cn->n_args < 2) return 0;
-        visit_expression(cg, ARG0, 1);
-        visit_expression(cg, ARG1, 2);
-        emit(cg, OP_STR_ASOCIAR_SECUENCIA, 1, 2, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        if (cn->n_args < 1) return 0;
+        if (cn->n_args == 1) {
+            visit_expression(cg, ARG0, 1);
+            emit(cg, OP_STR_ASOCIAR_SECUENCIA, 0, 1, 0, IR_INST_FLAG_B_REGISTER);
+        } else {
+            visit_expression(cg, ARG0, 1);
+            visit_expression(cg, ARG1, 2);
+            emit(cg, OP_STR_ASOCIAR_SECUENCIA, 1, 2, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        }
         emit(cg, OP_MOVER, dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
         return 1;
     }
     if (strcmp(name, "pensar_siguiente") == 0) {
         if (!ARG0) return 0;
         visit_expression(cg, ARG0, 10);
-        emit(cg, OP_MEM_PENSAR_SIGUIENTE, (uint8_t)dest_reg, 10, 0,
-             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        if (ARG1) {
+            visit_expression(cg, ARG1, 11);
+            emit(cg, OP_MEM_PENSAR_SIGUIENTE, 1, 10, 11, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+        } else {
+            emit(cg, OP_MEM_PENSAR_SIGUIENTE, 1, 10, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        }
+        emit(cg, OP_ID_A_TEXTO, 1, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        codegen_emit_write_resultado(cg, 1);
+        emit(cg, OP_MOVER, (uint8_t)dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
         return 1;
     }
     if (strcmp(name, "pensar_anterior") == 0) {
         if (!ARG0) return 0;
         visit_expression(cg, ARG0, 10);
-        emit(cg, OP_MEM_PENSAR_ANTERIOR, (uint8_t)dest_reg, 10, 0,
-             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        if (ARG1) {
+            visit_expression(cg, ARG1, 11);
+            emit(cg, OP_MEM_PENSAR_ANTERIOR, 1, 10, 11, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
+        } else {
+            emit(cg, OP_MEM_PENSAR_ANTERIOR, 1, 10, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        }
+        emit(cg, OP_ID_A_TEXTO, 1, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        codegen_emit_write_resultado(cg, 1);
+        emit(cg, OP_MOVER, (uint8_t)dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
         return 1;
     }
     if (strcmp(name, "buscar_asociados") == 0 || strcmp(name, "asociados_de") == 0) {
@@ -4022,7 +4103,8 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         visit_expression(cg, ARG0, 10);
         if (ARG1) visit_expression(cg, ARG1, 11);
         else emit(cg, OP_MOVER, 11, 0, 0, IR_INST_FLAG_B_IMMEDIATE | IR_INST_FLAG_C_IMMEDIATE);
-        emit(cg, OP_MEM_BUSCAR_ASOCIADOS, 1, 10, 11, 0);
+        emit(cg, OP_MEM_BUSCAR_ASOCIADOS, 1, 10, 11, 
+             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
         emit(cg, OP_ID_A_TEXTO, 1, 1, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
         codegen_emit_write_resultado(cg, 1);
         emit(cg, OP_MOVER, (uint8_t)dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
@@ -4094,6 +4176,14 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
                  IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
         }
 #endif
+        return 1;
+    }
+    if (strcmp(name, "obtener_secuencia") == 0) {
+        if (!ARG0) return 0;
+        visit_expression(cg, ARG0, 10);
+        emit(cg, OP_MEM_OBTENER_SECUENCIA, 1, 10, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        codegen_emit_write_resultado(cg, 1);
+        emit(cg, OP_MOVER, (uint8_t)dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
         return 1;
     }
     if (strcmp(name, "pausa") == 0) {
@@ -4909,7 +4999,7 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         }
         return 1;
     }
-    if (strcmp(name, "tiene_asociacion") == 0 || strcmp(name, "mem_obtener_fuerza") == 0) {
+    if (strcmp(name, "tiene_asociacion") == 0 || strcmp(name, "mem_obtener_fuerza") == 0 || strcmp(name, "buscar_peso") == 0) {
         if (cn->n_args < 2) return 0;
         visit_expression(cg, ARG0, 1);
         visit_expression(cg, ARG1, 2);

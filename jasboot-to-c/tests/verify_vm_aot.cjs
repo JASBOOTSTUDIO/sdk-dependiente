@@ -6,7 +6,7 @@
  *   node sdk-dependiente/jasboot-to-c/tests/verify_vm_aot.cjs ruta/a/prueba.jasb
  *   node sdk-dependiente/jasboot-to-c/tests/verify_vm_aot.cjs a.jasb b.jasb
  *
- * Sin argumentos: ejecuta el lote por defecto (102–116; 105 usa 105_atm_interactivo.stdin si existe).
+ * Sin argumentos: ejecuta el lote por defecto (lista defaultSuite; 105 usa 105_atm_interactivo.stdin si existe).
  * Opcional: JASBOOT_JBC_TO_C=ruta/al/jbc-to-c.exe (o .exe junto a tests/) para forzar el transpilador AOT.
  *
  * Requisitos: jbc.exe en sdk-dependiente/jas-compiler-c/bin, VM en jasboot-ir/bin, jbc-to-c junto al script o en PATH.
@@ -35,12 +35,14 @@ const defaultSuite = [
   path.join(__dirname, "lenguaje", "115_aot_lista_ruta_mapa.jasb"),
   path.join(__dirname, "lenguaje", "116_aot_index_miembro_mapa.jasb"),
   path.join(__dirname, "lenguaje", "117_aot_jmn_asociaciones.jasb"),
+  path.join(__dirname, "lenguaje", "119_aot_jmn_stmt_calls.jasb"),
   path.join(__dirname, "lenguaje", "118_aot_vec_mat.jasb"),
   path.join(__dirname, "analitica-neuronal", "200_aot_analitica_math.jasb"),
   path.join(__dirname, "analitica-neuronal", "201_aot_analitica_normalizacion.jasb"),
   path.join(__dirname, "analitica-neuronal", "202_aot_analitica_metricas_regresion.jasb"),
   path.join(__dirname, "analitica-neuronal", "203_aot_nativo_mlp_entrenar.jasb"),
   path.join(__dirname, "lenguaje", "pesado_bin_json_lab", "pl_main.jasb"),
+  path.join(workspaceRoot, "tests", "test_gestion_secuencias_completo.jasb"),
 ];
 
 function findJbc() {

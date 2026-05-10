@@ -993,6 +993,259 @@ static void gen_call(GenCtx *g, CallNode *c) {
         fputs(")", o);
         return;
     }
+    if (strcmp(nm, "abrir_memoria") == 0 && c->n_args >= 1) {
+        fputs("jb_abrir_memoria(", o);
+        gen_expr(g, c->args[0]);
+        fputs(")", o);
+        return;
+    }
+    if ((strcmp(nm, "consolidar_memoria") == 0 || strcmp(nm, "consolidar") == 0 || strcmp(nm, "dormir") == 0)) {
+        if (c->n_args != 0) {
+            fprintf(o, "(jb_warn_aot(\"%s: solo sin argumentos en AOT\"), jb_new_nulo())", nm ? nm : "");
+            return;
+        }
+        fputs("(jb_consolidar_memoria(), jb_new_nulo())", o);
+        return;
+    }
+    if ((strcmp(nm, "buscar_asociados") == 0 || strcmp(nm, "asociados_de") == 0) && c->n_args >= 1) {
+        fputs("jb_buscar_asociados(", o);
+        gen_expr(g, c->args[0]);
+        fputs(", ", o);
+        if (c->n_args >= 2)
+            gen_expr(g, c->args[1]);
+        else
+            fputs("jb_new_flotante(0)", o);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "obtener_relacionados") == 0 && c->n_args >= 1) {
+        fputs("jb_obtener_relacionados(", o);
+        gen_expr(g, c->args[0]);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "buscar_peso") == 0 || strcmp(nm, "tiene_asociacion") == 0 || strcmp(nm, "mem_obtener_fuerza") == 0) {
+        if (c->n_args >= 2) {
+            fputs("jb_mem_obtener_fuerza(", o);
+            gen_expr(g, c->args[0]);
+            fputs(", ", o);
+            gen_expr(g, c->args[1]);
+            fputs(")", o);
+            return;
+        }
+        if (c->n_args >= 1 && strcmp(nm, "buscar_peso") == 0) {
+            fputs("jb_buscar_peso(", o);
+            gen_expr(g, c->args[0]);
+            fputs(")", o);
+            return;
+        }
+    }
+    if (strcmp(nm, "reforzar") == 0) {
+        if (c->n_args >= 3) {
+            fputs("jb_reforzar(", o);
+            gen_expr(g, c->args[0]);
+            fputs(", ", o);
+            gen_expr(g, c->args[1]);
+            fputs(", ", o);
+            gen_expr(g, c->args[2]);
+            fputs(")", o);
+            return;
+        }
+        if (c->n_args >= 2) {
+            fputs("jb_reforzar_concepto(", o);
+            gen_expr(g, c->args[0]);
+            fputs(", ", o);
+            gen_expr(g, c->args[1]);
+            fputs(")", o);
+            return;
+        }
+    }
+    if (strcmp(nm, "penalizar") == 0) {
+        if (c->n_args >= 3) {
+            fputs("jb_penalizar(", o);
+            gen_expr(g, c->args[0]);
+            fputs(", ", o);
+            gen_expr(g, c->args[1]);
+            fputs(", ", o);
+            gen_expr(g, c->args[2]);
+            fputs(")", o);
+            return;
+        }
+        if (c->n_args >= 2) {
+            fputs("jb_penalizar_concepto(", o);
+            gen_expr(g, c->args[0]);
+            fputs(", ", o);
+            gen_expr(g, c->args[1]);
+            fputs(")", o);
+            return;
+        }
+    }
+    if (strcmp(nm, "olvidar") == 0 && c->n_args >= 1) {
+        fputs("jb_penalizar_concepto(", o);
+        gen_expr(g, c->args[0]);
+        fputs(", jb_new_entero(100))", o);
+        return;
+    }
+    if (strcmp(nm, "olvidar_debiles") == 0 && c->n_args >= 1) {
+        fputs("jb_olvidar_debiles(", o);
+        gen_expr(g, c->args[0]);
+        fputs(")", o);
+        return;
+    }
+    if ((strcmp(nm, "decae_conexiones") == 0 || strcmp(nm, "decaer_conexiones") == 0)) {
+        if (c->n_args >= 1) {
+            fputs("jb_decaer_conexiones(", o);
+            gen_expr(g, c->args[0]);
+            fputs(")", o);
+            return;
+        }
+        fputs("jb_decaer_conexiones(jb_new_flotante(0.95))", o);
+        return;
+    }
+    if (strcmp(nm, "obtener_todos_conceptos") == 0 && c->n_args == 0) {
+        fputs("jb_obtener_todos_conceptos()", o);
+        return;
+    }
+    if (strcmp(nm, "pensar") == 0 && c->n_args >= 1) {
+        fputs("jb_pensar(", o);
+        gen_expr(g, c->args[0]);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "pensar_respuesta") == 0 && c->n_args >= 1) {
+        fputs("jb_pensar_respuesta(", o);
+        gen_expr(g, c->args[0]);
+        fputs(", ", o);
+        if (c->n_args >= 2)
+            gen_expr(g, c->args[1]);
+        else
+            fputs("jb_new_flotante(0.5)", o);
+        fputs(", ", o);
+        if (c->n_args >= 3)
+            gen_expr(g, c->args[2]);
+        else
+            fputs("jb_new_flotante(0.1)", o);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "procesar_texto") == 0 && c->n_args >= 1) {
+        fputs("jb_procesar_texto(", o);
+        gen_expr(g, c->args[0]);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "comparar_patrones") == 0 && c->n_args >= 2) {
+        fputs("jb_comparar_patrones(", o);
+        gen_expr(g, c->args[0]);
+        fputs(", ", o);
+        gen_expr(g, c->args[1]);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "resolver_conflictos") == 0 && c->n_args >= 1) {
+        fputs("jb_resolver_conflictos(", o);
+        gen_expr(g, c->args[0]);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "resolver_conflictos_de") == 0 && c->n_args >= 1) {
+        fputs("jb_resolver_conflictos(", o);
+        gen_expr(g, c->args[0]);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "propagar_activacion") == 0 && c->n_args >= 1) {
+        fputs("jb_propagar_activacion(", o);
+        gen_expr(g, c->args[0]);
+        fputs(", ", o);
+        if (c->n_args >= 2)
+            gen_expr(g, c->args[1]);
+        else
+            fputs("jb_new_flotante(0.5)", o);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "propagar_activacion_de") == 0 && c->n_args >= 1) {
+        fputs("jb_propagar_activacion(", o);
+        gen_expr(g, c->args[0]);
+        fputs(", jb_new_flotante(0.5)", o);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "asociar_secuencia") == 0 && c->n_args == 1) {
+        fputs("jb_asociar_secuencia_solo(", o);
+        gen_expr(g, c->args[0]);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "asociar_secuencia") == 0 && c->n_args >= 3) {
+        fputs("jb_asociar(", o);
+        gen_expr(g, c->args[0]);
+        fputs(", ", o);
+        gen_expr(g, c->args[1]);
+        fputs(", ", o);
+        gen_expr(g, c->args[2]);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "asociar_secuencia") == 0 && c->n_args >= 2) {
+        fputs("jb_asociar_secuencia(", o);
+        gen_expr(g, c->args[0]);
+        fputs(", ", o);
+        gen_expr(g, c->args[1]);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "obtener_secuencia") == 0 && c->n_args >= 1) {
+        fputs("jb_obtener_secuencia(", o);
+        gen_expr(g, c->args[0]);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "pensar_siguiente") == 0 && c->n_args >= 1) {
+        fputs("jb_pensar_siguiente(", o);
+        gen_expr(g, c->args[0]);
+        fputs(", ", o);
+        if (c->n_args >= 2)
+            gen_expr(g, c->args[1]);
+        else
+            fputs("jb_new_nulo()", o);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "pensar_anterior") == 0 && c->n_args >= 1) {
+        fputs("jb_pensar_anterior(", o);
+        gen_expr(g, c->args[0]);
+        fputs(", ", o);
+        if (c->n_args >= 2)
+            gen_expr(g, c->args[1]);
+        else
+            fputs("jb_new_nulo()", o);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "corregir_secuencia") == 0 && c->n_args >= 3) {
+        fputs("jb_corregir_secuencia(", o);
+        gen_expr(g, c->args[0]);
+        fputs(", ", o);
+        gen_expr(g, c->args[1]);
+        fputs(", ", o);
+        gen_expr(g, c->args[2]);
+        fputs(")", o);
+        return;
+    }
+    if (strcmp(nm, "asociar_relacion") == 0 || strcmp(nm, "asociar_similitud") == 0 || strcmp(nm, "asociar_diferencia") == 0) {
+        if (c->n_args >= 3) {
+            fprintf(o, "jb_%s(", nm);
+            gen_expr(g, c->args[0]);
+            fputs(", ", o);
+            gen_expr(g, c->args[1]);
+            fputs(", ", o);
+            gen_expr(g, c->args[2]);
+            fputs(")", o);
+            return;
+        }
+    }
     if (is_user_func(g->prog, nm)) {
         fprintf(o, "jbf_%s(", nm);
         for (size_t i = 0; i < c->n_args; i++) {
@@ -1370,6 +1623,47 @@ static void gen_stmt(GenCtx *g, ASTNode *node) {
             fputs("}\n", o);
             break;
         }
+        case NODE_RECORDAR: {
+            RecordarNode *rn = (RecordarNode *)node;
+            ind(g);
+            if (rn->value) {
+                fputs("jb_recordar(", o);
+                gen_expr(g, rn->key);
+                fputs(", ", o);
+                gen_expr(g, rn->value);
+                fputs(");\n", o);
+            } else {
+                /* VM: recordar sin valor -> reforzar peso del nodo (magnitud implicita 100 = 1.0). */
+                fputs("jb_aprender_concepto(", o);
+                gen_expr(g, rn->key);
+                fputs(", jb_new_flotante(1.0));\n", o);
+            }
+            break;
+        }
+        case NODE_CREAR_MEMORIA: {
+            CrearMemoriaNode *cm = (CrearMemoriaNode *)node;
+            ind(g);
+            fputs("jb_crear_memoria(", o);
+            gen_expr(g, cm->filename);
+            fputs(");\n", o);
+            break;
+        }
+        case NODE_RESPONDER: {
+            ResponderNode *rn = (ResponderNode *)node;
+            ind(g);
+            fputs("jb_imprimir_id(", o);
+            gen_expr(g, rn->message);
+            fputs(");\n", o);
+            break;
+        }
+        case NODE_BUSCAR_PESO: {
+            BuscarPesoNode *bn = (BuscarPesoNode *)node;
+            ind(g);
+            fputs("(void)jb_buscar_peso(", o);
+            gen_expr(g, bn->concept);
+            fputs(");\n", o);
+            break;
+        }
         case NODE_DEFINE_CONCEPTO: {
             DefineConceptoNode *dn = (DefineConceptoNode *)node;
             ind(g);
@@ -1388,7 +1682,10 @@ static void gen_stmt(GenCtx *g, ASTNode *node) {
             fputs(", ", o);
             gen_expr(g, an->concept2);
             fputs(", ", o);
-            gen_expr(g, an->weight);
+            if (an->weight)
+                gen_expr(g, an->weight);
+            else
+                fputs("jb_new_flotante(0.9)", o);
             fputs(");\n", o);
             break;
         }

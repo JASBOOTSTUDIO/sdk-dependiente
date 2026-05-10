@@ -20,6 +20,7 @@ jmp_buf jb_try_stack[32];
 
 jb_var_t g_jmn_memoria;
 jb_var_t g_jmn_relaciones;
+jb_var_t g_jmn_secuencias;
 
 static char g_jmn_path[1024];
 static int g_argc;
@@ -423,23 +424,11 @@ int jb_truthy(jb_var_t v) {
     }
 }
 
-static int jb_texto_es_solo_numero(const char *s) {
-    if (!s || !*s) return 0;
-    if (*s == '-' || *s == '+') s++;
-    if (!*s) return 0;
-    for (; *s; s++)
-        if (!isdigit((unsigned char)*s)) return 0;
-    return 1;
-}
-
 void jb_imprimir(jb_var_t v) {
     switch (v.type) {
         case JB_TYPE_TEXTO:
-            if (jb_texto_es_solo_numero(v.u.str))
-                fputs(v.u.str ? v.u.str : "", stdout);
-            else {
-                jb_fputs_esc_texto(v.u.str ? v.u.str : "");
-            }
+            /* Paridad VM: texto como cadena literal (sin envoltura JSON). */
+            fputs(v.u.str ? v.u.str : "", stdout);
             fputc('\n', stdout);
             break;
         case JB_TYPE_ENTERO:
@@ -538,6 +527,7 @@ void jb_init(void) {
     g_last_throw = jb_new_nulo();
     g_jmn_memoria = jb_new_map();
     g_jmn_relaciones = jb_new_map();
+    g_jmn_secuencias = jb_new_map();
     g_jmn_path[0] = 0;
     g_argc = 0;
     g_argv = NULL;
@@ -550,6 +540,7 @@ void jb_cleanup(void) {
     jb_var_clear(&g_last_throw);
     jb_var_clear(&g_jmn_memoria);
     jb_var_clear(&g_jmn_relaciones);
+    jb_var_clear(&g_jmn_secuencias);
 }
 
 double jb_jmn_as_f64(jb_var_t v, double def) {
@@ -591,8 +582,10 @@ void jb_jmn_set_path(const char *p) {
 void jb_jmn_reset_memoria(void) {
     jb_var_clear(&g_jmn_memoria);
     jb_var_clear(&g_jmn_relaciones);
+    jb_var_clear(&g_jmn_secuencias);
     g_jmn_memoria = jb_new_map();
     g_jmn_relaciones = jb_new_map();
+    g_jmn_secuencias = jb_new_map();
 }
 
 static void jb_line_trim(char *s) {
@@ -633,6 +626,23 @@ int jb_jmn_load_from_path(const char *p) {
             if (!p2) continue;
             *p2++ = 0;
             jb_asociar(jb_new_texto(r), jb_new_texto(p1), jb_new_flotante_scalar(strtod(p2, NULL)));
+        } else if (strncmp(line, "Q|", 2) == 0) {
+            char *ctx = line + 2;
+            char *tail = strchr(ctx, '|');
+            jb_var_t L;
+            if (!tail) continue;
+            *tail++ = 0;
+            L = jb_new_list();
+            for (;;) {
+                char *n = strchr(tail, '|');
+                if (n) *n++ = 0;
+                jb_line_trim_both(tail);
+                if (tail[0]) jb_list_push(&L, jb_new_texto(tail));
+                if (!n) break;
+                tail = n;
+            }
+            jb_map_put(&g_jmn_secuencias, jb_new_texto(ctx), jb_var_clone(L));
+            jb_var_clear(&L);
         }
     }
     fclose(f);
@@ -674,6 +684,25 @@ void jb_jmn_save_to_path(const char *p) {
             }
             jb_var_clear(&rel);
             jb_var_clear(&ko);
+        }
+    M = g_jmn_secuencias.u.map;
+    if (M)
+        for (i = 0; i < M->len; i++) {
+            jb_var_t kc = jb_jmn_key_as_text(M->keys[i]);
+            jb_var_t lv = jb_var_clone(M->vals[i]);
+            const char *cks = kc.type == JB_TYPE_TEXTO && kc.u.str ? kc.u.str : "";
+            fprintf(f, "Q|%s", cks);
+            if (lv.type == JB_TYPE_LIST && lv.u.lst) {
+                for (j = 0; j < lv.u.lst->len; j++) {
+                    jb_var_t it = jb_jmn_key_as_text(lv.u.lst->items[j]);
+                    const char *is = it.type == JB_TYPE_TEXTO && it.u.str ? it.u.str : "";
+                    fprintf(f, "|%s", is);
+                    jb_var_clear(&it);
+                }
+            }
+            fprintf(f, "\n");
+            jb_var_clear(&kc);
+            jb_var_clear(&lv);
         }
     fclose(f);
 }
@@ -801,6 +830,183 @@ jb_var_t jb_asociar(jb_var_t origen, jb_var_t destino, jb_var_t fuerza) {
     return jb_var_clone(jb_resultado_global);
 }
 
+static int jb_seq_text_eq(jb_var_t a, jb_var_t b) {
+    jb_var_t ta = jb_jmn_key_as_text(a);
+    jb_var_t tb = jb_jmn_key_as_text(b);
+    const char *sa = ta.type == JB_TYPE_TEXTO && ta.u.str ? ta.u.str : "";
+    const char *sb = tb.type == JB_TYPE_TEXTO && tb.u.str ? tb.u.str : "";
+    int r = strcmp(sa, sb) == 0;
+    jb_var_clear(&ta);
+    jb_var_clear(&tb);
+    return r;
+}
+
+static void jb_seq_chain_list_items(jb_var_t lista_var) {
+    jb_list_t *L;
+    size_t i;
+    if (lista_var.type != JB_TYPE_LIST || !lista_var.u.lst) return;
+    L = lista_var.u.lst;
+    for (i = 0; i + 1 < L->len; i++)
+        jb_jmn_set_peso(L->items[i], L->items[i + 1], 1.0);
+}
+
+static jb_var_t jb_seq_next_in_list(jb_var_t lista, jb_var_t paso) {
+    size_t i;
+    if (lista.type != JB_TYPE_LIST || !lista.u.lst) return jb_new_texto("");
+    for (i = 0; i + 1 < lista.u.lst->len; i++) {
+        if (jb_seq_text_eq(lista.u.lst->items[i], paso))
+            return jb_jmn_key_as_text(lista.u.lst->items[i + 1]);
+    }
+    return jb_new_texto("");
+}
+
+static jb_var_t jb_seq_prev_in_list(jb_var_t lista, jb_var_t paso) {
+    size_t i;
+    if (lista.type != JB_TYPE_LIST || !lista.u.lst) return jb_new_texto("");
+    for (i = 1; i < lista.u.lst->len; i++) {
+        if (jb_seq_text_eq(lista.u.lst->items[i], paso))
+            return jb_jmn_key_as_text(lista.u.lst->items[i - 1]);
+    }
+    return jb_new_texto("");
+}
+
+/* Sin contexto: elige el destino con mayor peso (empates: ultimo en orden del mapa, alineado con VM en casos comunes). */
+static jb_var_t jb_pensar_siguiente_global(jb_var_t paso) {
+    jb_var_t kp = jb_jmn_key_as_text(paso);
+    jb_var_t rel = jb_map_get(g_jmn_relaciones, kp);
+    jb_var_t best = jb_new_texto("");
+    double bestw = -1.0;
+    size_t i;
+    if (rel.type == JB_TYPE_MAP && rel.u.map) {
+        for (i = 0; i < rel.u.map->len; i++) {
+            double w = jb_jmn_as_f64(rel.u.map->vals[i], 0.0);
+            if (w < 0.01) continue;
+            if (jb_seq_text_eq(rel.u.map->keys[i], paso)) continue;
+            if (w >= bestw) {
+                bestw = w;
+                jb_var_clear(&best);
+                best = jb_jmn_key_as_text(rel.u.map->keys[i]);
+            }
+        }
+    }
+    jb_var_clear(&rel);
+    jb_var_clear(&kp);
+    return best;
+}
+
+static jb_var_t jb_pensar_anterior_global(jb_var_t paso) {
+    jb_map_t *R = g_jmn_relaciones.u.map;
+    jb_var_t best = jb_new_texto("");
+    double bestw = -1.0;
+    size_t oi, di;
+    if (!R) return best;
+    for (oi = 0; oi < R->len; oi++) {
+        jb_var_t rel = jb_map_get(g_jmn_relaciones, R->keys[oi]);
+        if (rel.type != JB_TYPE_MAP || !rel.u.map) {
+            jb_var_clear(&rel);
+            continue;
+        }
+        for (di = 0; di < rel.u.map->len; di++) {
+            if (!jb_seq_text_eq(rel.u.map->keys[di], paso)) continue;
+            double w = jb_jmn_as_f64(rel.u.map->vals[di], 0.0);
+            if (w < 0.01) continue;
+            if (w >= bestw) {
+                bestw = w;
+                jb_var_clear(&best);
+                best = jb_jmn_key_as_text(R->keys[oi]);
+            }
+        }
+        jb_var_clear(&rel);
+    }
+    return best;
+}
+
+jb_var_t jb_asociar_secuencia_solo(jb_var_t lista) {
+    jb_seq_chain_list_items(lista);
+    jb_jmn_set_resultado(jb_new_bool(true));
+    return jb_var_clone(jb_resultado_global);
+}
+
+jb_var_t jb_asociar_secuencia(jb_var_t a, jb_var_t b) {
+    if (a.type == JB_TYPE_TEXTO && b.type == JB_TYPE_LIST) {
+        jb_var_t kctx = jb_jmn_key_as_text(a);
+        jb_map_put(&g_jmn_secuencias, kctx, jb_var_clone(b));
+        jb_var_clear(&kctx);
+        jb_seq_chain_list_items(b);
+        jb_jmn_set_resultado(jb_new_bool(true));
+        return jb_var_clone(jb_resultado_global);
+    }
+    if (a.type == JB_TYPE_LIST && b.type == JB_TYPE_LIST) {
+        jb_list_t *La = a.u.lst, *Lb = b.u.lst;
+        if (!La || !Lb || La->len == 0 || Lb->len == 0) {
+            jb_jmn_set_resultado(jb_new_bool(false));
+            return jb_var_clone(jb_resultado_global);
+        }
+        jb_jmn_set_peso(La->items[La->len - 1], Lb->items[0], 1.0);
+        jb_jmn_set_resultado(jb_new_bool(true));
+        return jb_var_clone(jb_resultado_global);
+    }
+    if (a.type == JB_TYPE_LIST && b.type == JB_TYPE_TEXTO) {
+        jb_list_t *La = a.u.lst;
+        if (!La || La->len == 0) {
+            jb_jmn_set_resultado(jb_new_bool(false));
+            return jb_var_clone(jb_resultado_global);
+        }
+        jb_jmn_set_peso(La->items[La->len - 1], b, 1.0);
+        jb_jmn_set_resultado(jb_new_bool(true));
+        return jb_var_clone(jb_resultado_global);
+    }
+    jb_jmn_set_resultado(jb_new_bool(false));
+    return jb_var_clone(jb_resultado_global);
+}
+
+jb_var_t jb_obtener_secuencia(jb_var_t contexto) {
+    jb_var_t k = jb_jmn_key_as_text(contexto);
+    jb_var_t L = jb_map_get(g_jmn_secuencias, k);
+    jb_var_t out = (L.type == JB_TYPE_LIST) ? jb_var_clone(L) : jb_new_list();
+    jb_var_clear(&L);
+    jb_jmn_set_resultado(out);
+    jb_var_clear(&k);
+    return out;
+}
+
+jb_var_t jb_pensar_siguiente(jb_var_t paso, jb_var_t contexto_opt) {
+    jb_var_t out;
+    if (contexto_opt.type != JB_TYPE_NULL) {
+        jb_var_t kc = jb_jmn_key_as_text(contexto_opt);
+        jb_var_t L = jb_map_get(g_jmn_secuencias, kc);
+        out = jb_seq_next_in_list(L, paso);
+        jb_var_clear(&L);
+        jb_var_clear(&kc);
+    } else
+        out = jb_pensar_siguiente_global(paso);
+    jb_jmn_set_resultado(out);
+    jb_var_clear(&out);
+    return jb_var_clone(jb_resultado_global);
+}
+
+jb_var_t jb_pensar_anterior(jb_var_t paso, jb_var_t contexto_opt) {
+    jb_var_t out;
+    if (contexto_opt.type != JB_TYPE_NULL) {
+        jb_var_t kc = jb_jmn_key_as_text(contexto_opt);
+        jb_var_t L = jb_map_get(g_jmn_secuencias, kc);
+        out = jb_seq_prev_in_list(L, paso);
+        jb_var_clear(&L);
+        jb_var_clear(&kc);
+    } else
+        out = jb_pensar_anterior_global(paso);
+    jb_jmn_set_resultado(out);
+    jb_var_clear(&out);
+    return jb_var_clone(jb_resultado_global);
+}
+
+jb_var_t jb_corregir_secuencia(jb_var_t anterior, jb_var_t incorrecto, jb_var_t correcto) {
+    jb_jmn_set_peso(anterior, incorrecto, 0.01);
+    jb_jmn_set_peso(anterior, correcto, 1.0);
+    jb_jmn_set_resultado(jb_new_bool(true));
+    return jb_var_clone(jb_resultado_global);
+}
+
 jb_var_t jb_reforzar(jb_var_t origen, jb_var_t destino, jb_var_t delta) {
     jb_var_t ko = jb_jmn_key_as_text(origen);
     jb_var_t kd = jb_jmn_key_as_text(destino);
@@ -902,6 +1108,87 @@ jb_var_t jb_buscar_peso(jb_var_t concepto) {
     jb_jmn_set_resultado(out);
     jb_var_clear(&kc);
     return out;
+}
+
+/* Peso de la arista origen->destino (paridad con buscar_peso / mem_obtener_fuerza de dos argumentos en VM). */
+jb_var_t jb_mem_obtener_fuerza(jb_var_t origen, jb_var_t destino) {
+    double w = jb_jmn_get_peso(origen, destino);
+    jb_var_t out = jb_new_flotante_scalar(w);
+    jb_jmn_set_resultado(out);
+    return out;
+}
+
+/*
+ * reforzar(concepto, magnitud) / penalizar(concepto, magnitud) en VM: magnitud 1..100 como fracción sobre
+ * todas las aristas salientes del concepto. Distinto de jb_reforzar/jb_penalizar (arista origen->destino).
+ */
+jb_var_t jb_reforzar_concepto(jb_var_t concepto, jb_var_t magnitud) {
+    jb_var_t ko = jb_jmn_key_as_text(concepto);
+    int mag = (int)jb_jmn_as_f64(magnitud, 10.0);
+    if (mag < 1) mag = 1;
+    if (mag > 100) mag = 100;
+    double delta = (double)mag / 100.0;
+    jb_var_t rel = jb_map_get(g_jmn_relaciones, ko);
+    if (rel.type == JB_TYPE_MAP && rel.u.map) {
+        size_t i;
+        for (i = 0; i < rel.u.map->len; i++) {
+            double w = jb_jmn_as_f64(rel.u.map->vals[i], 0.0);
+            w = jb_jmn_clamp01(w + delta);
+            jb_map_put(&rel, rel.u.map->keys[i], jb_new_flotante_scalar(w));
+        }
+    }
+    jb_map_put(&g_jmn_relaciones, ko, rel);
+    jb_var_clear(&rel);
+    jb_var_clear(&ko);
+    jb_jmn_set_resultado(jb_new_bool(true));
+    return jb_var_clone(jb_resultado_global);
+}
+
+jb_var_t jb_penalizar_concepto(jb_var_t concepto, jb_var_t magnitud) {
+    jb_var_t ko = jb_jmn_key_as_text(concepto);
+    int mag = (int)jb_jmn_as_f64(magnitud, 10.0);
+    if (mag < 1) mag = 1;
+    if (mag > 100) mag = 100;
+    double delta = (double)mag / 100.0;
+    jb_var_t rel = jb_map_get(g_jmn_relaciones, ko);
+    if (rel.type == JB_TYPE_MAP && rel.u.map) {
+        size_t i;
+        for (i = 0; i < rel.u.map->len; i++) {
+            double w = jb_jmn_as_f64(rel.u.map->vals[i], 0.0);
+            w = jb_jmn_clamp01(w - delta);
+            jb_map_put(&rel, rel.u.map->keys[i], jb_new_flotante_scalar(w));
+        }
+    }
+    jb_map_put(&g_jmn_relaciones, ko, rel);
+    jb_var_clear(&rel);
+    jb_var_clear(&ko);
+    jb_jmn_set_resultado(jb_new_bool(true));
+    return jb_var_clone(jb_resultado_global);
+}
+
+/* Elimina aristas salientes con peso estrictamente menor al umbral (0..1). */
+jb_var_t jb_olvidar_debiles(jb_var_t umbral_v) {
+    double th = jb_jmn_clamp01(jb_jmn_as_f64(umbral_v, 0.1));
+    jb_map_t *R = g_jmn_relaciones.u.map;
+    size_t oi, di;
+    if (!R) return jb_new_bool(true);
+    for (oi = 0; oi < R->len; oi++) {
+        jb_var_t ko = jb_var_clone(R->keys[oi]);
+        jb_var_t old_rel = jb_map_get(g_jmn_relaciones, ko);
+        jb_var_t new_rel = jb_new_map();
+        if (old_rel.type == JB_TYPE_MAP && old_rel.u.map) {
+            for (di = 0; di < old_rel.u.map->len; di++) {
+                double w = jb_jmn_as_f64(old_rel.u.map->vals[di], 0.0);
+                if (w >= th)
+                    jb_map_put(&new_rel, jb_var_clone(old_rel.u.map->keys[di]), jb_var_clone(old_rel.u.map->vals[di]));
+            }
+        }
+        jb_map_put(&g_jmn_relaciones, ko, new_rel);
+        jb_var_clear(&new_rel);
+        jb_var_clear(&old_rel);
+        jb_var_clear(&ko);
+    }
+    return jb_new_bool(true);
 }
 
 jb_var_t jb_recordar_stub(jb_var_t key, jb_var_t val) { return jb_recordar(key, val); }
@@ -2052,7 +2339,6 @@ jb_var_t jb_propiedad_concepto(jb_var_t concepto, jb_var_t prop) {
 
 jb_var_t jb_asociar_relacion(jb_var_t a, jb_var_t b, jb_var_t f) { return jb_asociar(a, b, f); }
 jb_var_t jb_asociar_similitud(jb_var_t a, jb_var_t b, jb_var_t f) { return jb_asociar(a, b, f); }
-jb_var_t jb_asociar_secuencia(jb_var_t a, jb_var_t b, jb_var_t f) { return jb_asociar(a, b, f); }
 jb_var_t jb_asociar_diferencia(jb_var_t a, jb_var_t b, jb_var_t f) { return jb_asociar(a, b, f); }
 
 jb_var_t jb_comparar_patrones(jb_var_t a, jb_var_t b) {

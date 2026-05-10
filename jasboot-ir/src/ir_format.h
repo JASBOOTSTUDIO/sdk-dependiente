@@ -35,7 +35,7 @@
 #define IR_INST_FLAG_KERNEL_ONLY (1 << 5)
 #define IR_INST_FLAG_A_REGISTER (1 << 6)
 #define IR_INST_FLAG_B_REGISTER (1 << 7)
-#define IR_INST_FLAG_C_REGISTER 0x00 // No hay bits libres, pero se usa para legibilidad en el compilador
+#define IR_INST_FLAG_C_REGISTER (1 << 5) // Reutilizamos bit de kernel para indicar C como registro
 
 // IA metadata (estructura extendida)
 #define IR_IA_MAGIC_0 'I'
@@ -133,6 +133,7 @@ typedef enum {
     OP_CMP_GE_U = 0x3B,    // A ← (uint64)B >= (uint64)C
 
     // Control de flujo
+    OP_MEM_BUSCAR_MAPA_ASOCIADOS = 0x3F,  // A <- mapa {id: [asoc...]}; B=lista_id, C=rango(min|max<<8)
     OP_IR = 0x40,          // PC ← A
     OP_SI = 0x41,          // si A ≠ 0 → PC ← B
     OP_LLAMAR = 0x42,      // push PC; PC ← A
@@ -142,6 +143,7 @@ typedef enum {
     OP_HEAP_LIBERAR = 0x46,  // liberar(A)
     OP_IR_ESCRIBIR = 0x47,   // Escribir IR actual a archivo (ruta: reg A = id concepto)
     OP_ID_A_TEXTO = 0x48,    // A <- Texto del ID B
+    OP_MEM_OBTENER_SECUENCIA = 0x4D,
 
     // Conversión
     OP_CONV_I2F = 0x90,    // Conversión entero -> flotante
