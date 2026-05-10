@@ -1,0 +1,14 @@
+/* Paridad VM vs AOT: lista_limpiar, lista_liberar, dividir/dividir_texto (runtime jb_*). */
+principal
+    lista xs = crear_lista()
+    lista_agregar(xs, str_desde_numero(10))
+    lista_agregar(xs, str_desde_numero(20))
+    imprimir str_desde_numero(lista_tamano(xs))
+    lista_limpiar(xs)
+    imprimir str_desde_numero(lista_tamano(xs))
+    lista partes = dividir("uno,dos,tres", ",")
+    imprimir str_desde_numero(lista_tamano(partes))
+    lista ys = crear_lista()
+    lista_agregar(ys, str_desde_numero(7))
+    imprimir str_desde_numero(lista_liberar(ys))
+fin_principal

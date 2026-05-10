@@ -35,7 +35,7 @@
 #define IR_INST_FLAG_KERNEL_ONLY (1 << 5)
 #define IR_INST_FLAG_A_REGISTER (1 << 6)
 #define IR_INST_FLAG_B_REGISTER (1 << 7)
-#define IR_INST_FLAG_C_REGISTER 0x00 // No hay bits libres, pero se usa para legibilidad en el compilador
+#define IR_INST_FLAG_C_REGISTER (1 << 5) // Reutilizamos bit de kernel para indicar C como registro
 
 // IA metadata (estructura extendida)
 #define IR_IA_MAGIC_0 'I'
@@ -92,6 +92,10 @@ typedef enum {
     OP_DEBUG_LINE = 0x07,  // Guarda línea actual en estado de la VM (B|C)
     /* A <- MSE float (ultimo epoch); B = registro base de 7 args (pesos_id, sesgos_id, X_id, y_id, capas_id, lr f32, epochs u32). */
     OP_ANALITICA_MLP_FIT = 0x08,
+    OP_ANALITICA_MLP_PREDICT = 0x09,
+    OP_ANALITICA_MLP_SAVE = 0x0A,
+    OP_MEM_PENALIZAR = 0x0E,
+    OP_IMPRIMIR_BOOLEANO = 0x0F,
     
     // Aritmética
     OP_SUMAR = 0x10,       // A ← B + C
@@ -129,6 +133,7 @@ typedef enum {
     OP_CMP_GE_U = 0x3B,    // A ← (uint64)B >= (uint64)C
 
     // Control de flujo
+    OP_MEM_BUSCAR_MAPA_ASOCIADOS = 0x3F,  // A <- mapa {id: [asoc...]}; B=lista_id, C=rango(min|max<<8)
     OP_IR = 0x40,          // PC ← A
     OP_SI = 0x41,          // si A ≠ 0 → PC ← B
     OP_LLAMAR = 0x42,      // push PC; PC ← A
@@ -138,6 +143,7 @@ typedef enum {
     OP_HEAP_LIBERAR = 0x46,  // liberar(A)
     OP_IR_ESCRIBIR = 0x47,   // Escribir IR actual a archivo (ruta: reg A = id concepto)
     OP_ID_A_TEXTO = 0x48,    // A <- Texto del ID B
+    OP_MEM_OBTENER_SECUENCIA = 0x4D,
 
     // Conversión
     OP_CONV_I2F = 0x90,    // Conversión entero -> flotante
@@ -225,6 +231,7 @@ typedef enum {
     OP_MEM_MAPA_PONER = 0x62,        // SetMap(A:map_id, B:key_id, C:val_reg)
     OP_MEM_MAPA_OBTENER = 0x63,      // A <- GetMap(B:map_id, C:key_id)
     OP_MEM_MAPA_TAMANO = 0x7E,       // A <- count entries (B: map_id reg)
+    OP_MEM_MAPA_BORRAR = 0xE3,
     OP_MEM_MAPA_LLAVES = 0x0C,       // A <- lista_id con llaves (B: map_id reg)
     OP_MEM_MAPA_CONTIENE = 0x0D,     // A <- 1 if key C exists in map B, else 0
     OP_FS_LEER_BYTE = 0x64,          // A <- fgetc(handle B)
@@ -298,7 +305,6 @@ typedef enum {
     
     OP_MEM_ASOCIAR = 0xE8,           // Crear asociación entre dos conceptos
     OP_MEM_ECO = 0xFD,               // Eco de concepto (imitación)
-    OP_MEM_PENALIZAR = 0xE3,         // Penalizar peso de asociación
     OP_TCP_ENVIAR = 0x19,            // A <- enviar socket B, payload bytes/texto C
     OP_TCP_RECIBIR = 0x1A,           // A <- bytes recibidos de socket B hasta max C
     OP_TCP_CERRAR = 0x1B,            // Cerrar socket en A

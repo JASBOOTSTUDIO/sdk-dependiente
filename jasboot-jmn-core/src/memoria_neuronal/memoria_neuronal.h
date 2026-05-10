@@ -128,6 +128,8 @@ void jmn_crear_mapa(JMNMemoria* mem, uint32_t map_id);
 /** Numero de pares clave-valor almacenados en el slot del mapa (0 si el mapa no tiene buffer). */
 uint32_t jmn_mapa_tamano(JMNMemoria* mem, uint32_t map_id);
 void jmn_mapa_insertar(JMNMemoria* mem, uint32_t map_id, uint32_t key, JMNValor val);
+/** Elimina la entrada con la clave dada si existe (reduce tamano). Sin efecto si la clave no esta. */
+void jmn_mapa_eliminar(JMNMemoria* mem, uint32_t map_id, uint32_t key);
 /** 1 si la clave existe en el slot del mapa; en *out el valor (si out no es NULL). */
 int jmn_mapa_obtener_si_existe(JMNMemoria* mem, uint32_t map_id, uint32_t key, JMNValor* out);
 JMNValor jmn_mapa_obtener(JMNMemoria* mem, uint32_t map_id, uint32_t key);

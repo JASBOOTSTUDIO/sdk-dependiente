@@ -2062,7 +2062,7 @@ static void unused_scan_stmt(ASTNode *node, UnusedDeclVec *decls, int *depth) {
             break;
         case NODE_INPUT: {
             InputNode *in = (InputNode*)node;
-            if (in->variable) unused_vec_push(decls, in->variable, node->line, node->col, *depth, 0, NULL);
+            if (in->variable) unused_vec_mark_used(decls, in->variable, *depth);
             break;
         }
         case NODE_IF: {
@@ -2483,7 +2483,7 @@ int do_compile(const char *in_path, const char *out_path, char **err_msg) {
     SymbolTable sym;
     sym_init_global(&sym);
     sym.is_global = 1;
-    if (resolve_program(ast, &sym) > 0) {
+    if (resolve_program(ast, &sym, buf, diag_path) > 0) {
         fprintf(stderr, "%sCompilacion fallida: error al registrar clases/registros (herencia o orden de tipos).%s\n",
                 ANSI_RED, ANSI_RESET);
         

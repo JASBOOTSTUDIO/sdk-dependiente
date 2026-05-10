@@ -1,0 +1,9 @@
+/* Importa tipo registro desde modulo; instancia como mapa en AOT (paridad con VM). */
+usar { Punto } de "113_mod_registro.jasb"
+
+principal
+    Punto p
+    p.x = 3
+    p.yy = 4
+    imprimir texto_desde_numero(p.x + p.yy)
+fin_principal

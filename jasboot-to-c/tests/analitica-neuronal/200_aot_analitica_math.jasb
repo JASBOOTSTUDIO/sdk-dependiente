@@ -1,0 +1,8 @@
+# Paridad VM/AOT — math_lib (raíz, potencia, exponencial)
+usar { raiz_cuadrada, potencia, exponencial } de "../../../../stdlib/analitica-neuronal/math_lib.jasb"
+
+principal
+    imprimir raiz_cuadrada(4.0)
+    imprimir potencia(2.0, 3.0)
+    imprimir exponencial(0.0)
+fin_principal

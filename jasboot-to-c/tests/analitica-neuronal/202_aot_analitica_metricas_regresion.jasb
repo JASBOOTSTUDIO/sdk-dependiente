@@ -1,0 +1,16 @@
+# Paridad VM/AOT — MAE con listas idénticas (error 0)
+usar { MetricasRegresion } de "../../../../stdlib/analitica-neuronal/metricas/metricas_regresion.jasb"
+
+principal
+    MetricasRegresion m
+    m = MetricasRegresion()
+    lista y1
+    y1 = crear_lista()
+    lista_agregar(y1, 1.0)
+    lista_agregar(y1, 2.0)
+    lista y2
+    y2 = crear_lista()
+    lista_agregar(y2, 1.0)
+    lista_agregar(y2, 2.0)
+    imprimir m.calcular_mae(y1, y2)
+fin_principal

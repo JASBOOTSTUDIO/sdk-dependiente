@@ -248,8 +248,11 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != OP_STR_EXTRAER_ANTES && inst.opcode != OP_STR_EXTRAER_DESPUES &&
             inst.opcode != OP_STR_EXTRAER_ANTES_REG && inst.opcode != OP_STR_EXTRAER_DESPUES_REG &&
             inst.opcode != OP_STR_CONCATENAR && inst.opcode != OP_STR_CONCATENAR_REG &&
+            inst.opcode != OP_ANALITICA_MLP_FIT &&
+            inst.opcode != OP_ANALITICA_MLP_PREDICT &&
             inst.opcode != OP_STR_REGISTRAR_LITERAL &&
             inst.opcode != OP_IMPRIMIR_NUMERO &&
+            inst.opcode != OP_IMPRIMIR_BOOLEANO &&
             inst.opcode != OP_MEM_PENSAR &&
             inst.opcode != OP_MEM_ASOCIAR &&
             inst.opcode != OP_MEM_ULTIMA_PALABRA &&
@@ -299,12 +302,16 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != OP_FS_LEER_U32 &&
             inst.opcode != OP_MEM_MAPA_CREAR &&
             inst.opcode != OP_MEM_MAPA_PONER &&
+            inst.opcode != OP_MEM_MAPA_BORRAR &&
             inst.opcode != OP_MEM_MAPA_OBTENER &&
             inst.opcode != OP_MEM_MAPA_TAMANO &&
             inst.opcode != OP_MEM_OBTENER_RELACIONADOS &&
             inst.opcode != OP_MEM_ES_VARIABLE_SISTEMA &&
             inst.opcode != OP_MEM_CONTIENE_TEXTO_REG &&
             inst.opcode != OP_MEM_TERMINA_CON_REG &&
+            inst.opcode != OP_MEM_OBTENER_SECUENCIA &&
+            inst.opcode != OP_MEM_PROPAGAR_ACTIVACION &&
+            inst.opcode != OP_MEM_DECAE_CONEXIONES &&
             inst.opcode != OP_MEM_OBTENER_TODOS &&
             inst.opcode != OP_FS_LISTAR &&
             inst.opcode != OP_FS_BORRAR &&
@@ -336,7 +343,9 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != OP_MEM_COMPARAR_PATRONES &&
             inst.opcode != OP_MEM_BUSCAR_ASOCIADOS &&
             inst.opcode != OP_MEM_BUSCAR_ASOCIADOS_LISTA &&
+            inst.opcode != OP_MEM_BUSCAR_MAPA_ASOCIADOS &&
             inst.opcode != OP_MEM_OBTENER_VALOR &&
+            inst.opcode != OP_MEM_MAPA_LLAVES &&
             inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA &&
             inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA_LISTA &&
             inst.opcode != OP_MEM_BUSCAR_INTROSPECTIVA_CS &&

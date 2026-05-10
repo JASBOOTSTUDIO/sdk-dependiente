@@ -1,0 +1,11 @@
+/* Lista dentro de mapa: lista_agregar / lista_poner sobre ruta id.campo (AOT no usa & sobre rvalue). */
+principal
+    mapa m = mapa_crear()
+    lista externa = lista_crear()
+    mapa_poner(m, "L", externa)
+    lista_agregar(m.L, 10)
+    lista_agregar(m.L, 20)
+    imprimir lista_tamano(m.L)
+    lista_poner(m.L, 0, 99)
+    imprimir lista_obtener(m.L, 0)
+fin_principal

@@ -5,23 +5,47 @@
 
 int jmn_buscar_asociaciones(JMNMemoria* mem, uint32_t origen, uint32_t tipo_rel, float umbral,
     uint16_t profundidad, JMNBusquedaResultado* out, uint16_t max_out) {
-    (void)profundidad;
     if (!mem || !out || max_out == 0) return 0;
-    uint32_t bucket = origen % (mem->cap_nodos + 1);
-    if (bucket > mem->cap_nodos) bucket = mem->cap_nodos;
-    uint32_t slot = mem->cabeza_origen[bucket];
-    int n = 0;
-    while (slot != 0xFFFFFFFF && n < (int)max_out) {
-        if (mem->conexiones[slot].origen_id == origen &&
-            mem->conexiones[slot].fuerza.f >= umbral) {
-            if (tipo_rel == 0 || mem->conexiones[slot].key_id == tipo_rel) {
-                out[n].id = mem->conexiones[slot].destino_id;
-                out[n].tipo_relacion = mem->conexiones[slot].key_id;
-                out[n].fuerza = mem->conexiones[slot].fuerza.f;
-                n++;
+    
+    uint16_t p = profundidad;
+    if (p == 0) p = 1;
+    if (p > 5) p = 5; // Limite de seguridad
+
+    // Para profundidad 1, usamos la búsqueda directa rápida
+    if (p == 1) {
+        uint32_t bucket = origen % (mem->cap_nodos + 1);
+        if (bucket > mem->cap_nodos) bucket = mem->cap_nodos;
+        uint32_t slot = mem->cabeza_origen[bucket];
+        int n = 0;
+        while (slot != 0xFFFFFFFF && n < (int)max_out) {
+            if (mem->conexiones[slot].origen_id == origen &&
+                mem->conexiones[slot].fuerza.f >= umbral) {
+                if (tipo_rel == 0 || mem->conexiones[slot].key_id == tipo_rel) {
+                    out[n].id = mem->conexiones[slot].destino_id;
+                    out[n].tipo_relacion = mem->conexiones[slot].key_id;
+                    out[n].fuerza = mem->conexiones[slot].fuerza.f;
+                    n++;
+                }
             }
+            slot = mem->conexiones[slot].next_origen;
         }
-        slot = mem->conexiones[slot].next_origen;
+        return n;
+    }
+
+    // Para profundidad > 1, usamos una búsqueda por propagación (BFS simplificado)
+    JMNActivacionResultado act_res[64];
+    int n_act = jmn_propagar_activacion(mem, origen, 1.0f, 0.8f, umbral, p, tipo_rel, act_res, 64, NULL, 0, NULL);
+    
+    int n = 0;
+    for (int i = 0; i < n_act && n < (int)max_out; i++) {
+        // No incluir el origen mismo
+        if (act_res[i].id == origen) continue;
+        
+        out[n].id = act_res[i].id;
+        out[n].fuerza = act_res[i].activacion;
+        // El tipo de relación es difuso en propagación, ponemos 0 o el tipo solicitado
+        out[n].tipo_relacion = tipo_rel; 
+        n++;
     }
     return n;
 }

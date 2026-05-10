@@ -21,9 +21,11 @@
 #define IR_INST_FLAG_RELATIVE    (1 << 3)
 #define IR_INST_FLAG_A_REGISTER  (1 << 6)
 #define IR_INST_FLAG_B_REGISTER  (1 << 7)
-#define IR_INST_FLAG_C_REGISTER  0x00
+#define IR_INST_FLAG_C_REGISTER (1 << 5)
 
 #define OP_HALT           0x00
+#define OP_MEM_PENALIZAR  0x0E /* VM legacy: penalizar asociación (no confundir con MAPA_BORRAR 0xE3) */
+#define OP_IMPRIMIR_BOOLEANO 0x0F /* A reg: imprime verdadero/falso (español), distinto de entero 0/1 */
 #define OP_MOVER          0x01
 #define OP_LEER           0x02
 #define OP_ESCRIBIR       0x03
@@ -32,6 +34,9 @@
 #define OP_GET_FP         0x06   /* A <- FP (frame pointer) */
 #define OP_DEBUG_LINE     0x07   /* VM guarda la linea actual en su estado (B|C) */
 #define OP_ANALITICA_MLP_FIT 0x08 /* MLP 1 oculta ReLU + salida sigmoid; ver ir_format.h */
+#define OP_ANALITICA_MLP_PREDICT 0x9F /* Inferencia MLP simple */
+#define OP_ANALITICA_MLP_SAVE 0x9E /* Guardar MLP a binario JBM1 */
+#define OP_MEM_MAPA_CONTIENE 0x0D /* A <- 1 si clave C existe en mapa B, else 0 */
 
 #define OP_SUMAR          0x10
 #define OP_RESTAR         0x11
@@ -154,6 +159,7 @@
 #define OP_HEAP_RESERVAR  0x45      /* A <- reservar(B bytes) */
 #define OP_HEAP_LIBERAR   0x46      /* liberar(A) */
 #define OP_ID_A_TEXTO     0x48      /* A <- Texto del ID B */
+#define OP_MEM_OBTENER_SECUENCIA 0x4D
 
 #define OP_IMPRIMIR_TEXTO 0x5B
 #define OP_STR_REGISTRAR_LITERAL 0xE4
@@ -177,8 +183,9 @@
 #define OP_STR_COPIAR          0x51
 #define OP_MEM_APRENDER_PESO_REG 0xE7
 #define OP_MEM_OBTENER_VALOR   0xCB
-#define OP_MEM_DECAE_CONEXIONES 0xCC
-#define OP_MEM_PROPAGAR_ACTIVACION 0xCD
+#define OP_MEM_BUSCAR_INTROSPECTIVA 0xCC
+#define OP_MEM_DECAE_CONEXIONES 0xCD
+#define OP_MEM_PROPAGAR_ACTIVACION 0xCE
 #define OP_IO_INPUT_REG        0xE5
 #define OP_IO_PERCIBIR_TECLADO 0x6C
 #define OP_IO_ENTRADA_FLOTANTE 0x8E
@@ -262,6 +269,7 @@
 #define OP_MEM_COMPARAR_PATRONES    0xC8
 #define OP_MEM_BUSCAR_ASOCIADOS     0xC9
 #define OP_MEM_BUSCAR_ASOCIADOS_LISTA 0xCA
+#define OP_MEM_BUSCAR_MAPA_ASOCIADOS  0x3F
 #define OP_MEM_PROCESAR_TEXTO         0xDE
 #define OP_MEM_PENSAR                 0xDF
 

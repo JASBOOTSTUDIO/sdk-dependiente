@@ -95,6 +95,8 @@ int sym_is_parameter(SymbolTable *st, const char *name);
 SymResult sym_lookup(SymbolTable *st, const char *name);
 const char *sym_lookup_type(SymbolTable *st, const char *name);
 const char *sym_lookup_lista_elem(SymbolTable *st, const char *name);
+/* T de lista<T>, mapa<T> o variantes opcionales lista?/mapa?; NULL si no aplica o sin T. */
+const char *sym_lookup_collection_elem_type(SymbolTable *st, const char *name);
 const char *sym_lookup_tarea_elem(SymbolTable *st, const char *name);
 
 /* 3.6 get_or_create */

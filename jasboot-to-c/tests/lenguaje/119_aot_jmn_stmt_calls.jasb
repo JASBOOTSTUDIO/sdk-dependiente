@@ -1,0 +1,10 @@
+/*
+ * Paridad VM/AOT: sentencias JMN (recordar, crear_memoria) + llamadas (consolidar, peso de arista).
+ */
+principal
+    crear_memoria("sdk-dependiente/jasboot-to-c/tests/lenguaje/119_mem.jmn")
+    recordar "k1" con valor "v1"
+    imprimir buscar_peso("k1", "v1")
+    consolidar_memoria()
+    cerrar_memoria()
+fin_principal

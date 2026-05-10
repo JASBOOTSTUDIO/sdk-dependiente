@@ -1,0 +1,22 @@
+principal
+    mapa m = mapa_crear()
+    mapa_poner(m, "a", str_desde_numero(1))
+    mapa_poner(m, "b", str_desde_numero(2))
+    imprimir str_desde_numero(mapa_tamano(m))
+    entero s = 0
+    para cada texto v en m hacer
+        s = s + str_a_entero(v)
+    fin_para_cada
+    imprimir str_desde_numero(s)
+    texto t = "hola"
+    imprimir minusculas(mayusculas(t))
+    entero n = 5
+    seleccionar n hacer
+        caso 1, 2, 3
+            imprimir "low"
+        caso 4, 5, 6
+            imprimir "mid"
+        defecto
+            imprimir "def"
+    fin_seleccionar
+fin_principal

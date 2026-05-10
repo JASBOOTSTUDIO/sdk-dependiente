@@ -1,0 +1,12 @@
+/* Modulo 1/3: textos de interfaz (laboratorio JSON + binario). */
+enviar funcion pl_ui_banner(entero modo) retorna texto
+    retornar "========== Laboratorio JSON + binario (3 modulos) =========="
+fin_funcion
+
+enviar funcion pl_ui_subtitulo(entero modo) retorna texto
+    retornar "Menu: JSON (modulo 2), binario en disco (modulo 3), textos aqui (modulo 1)."
+fin_funcion
+
+enviar funcion pl_ui_opciones(entero modo) retorna texto
+    retornar "1 Ayuda | 2 JSON demo | 3 Bin marcador | 4 Bin estres N | 5 JSON linea propia | 6 Borrar bin demo | 0 Salir"
+fin_funcion

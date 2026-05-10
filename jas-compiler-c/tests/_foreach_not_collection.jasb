@@ -1,0 +1,6 @@
+principal
+    entero x = 1
+    para cada entero v en x hacer
+        imprimir v
+    fin_para_cada
+fin_principal

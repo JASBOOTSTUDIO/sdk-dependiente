@@ -10,7 +10,7 @@ const char *const SISTEMA_LLAMADAS[] = {
     "listar_archivos", "fs_listar", "finalizar", "olvidar", "obtener_campo", "bit_shl", "bit_shr",
     "sistema_ejecutar", "mapa_crear", "mapa_poner", "mapa_obtener", "mapa_eliminar", "mapa_tamano", "mapa_contiene",
     "str_a_entero", "str_a_flotante", "convertir_entero", "convertir_flotante", "fs_abrir", "fs_cerrar", "fs_escribir", "fs_leer_linea",
-    "fs_leer_byte", "fs_escribir_byte", "fs_leer_texto", "sys_argc", "sys_argv", "str_extraer_caracter", "str_desde_numero", "decimal", "codigo_caracter", "caracter_a_texto",
+    "fs_leer_byte", "fs_escribir_byte", "fs_leer_texto", "sys_argc", "sys_argv", "str_extraer_caracter", "str_desde_numero", "texto_desde_numero", "decimal", "codigo_caracter", "caracter_a_texto",
     "byte_a_caracter", "caracter_a_byte",
     "lista_crear", "mem_lista_crear", "mem_lista_agregar", "mem_lista_obtener", "mem_lista_tamano", "lista_poner", "mem_lista_poner",
     "lista_limpiar", "mem_lista_limpiar",
@@ -19,9 +19,9 @@ const char *const SISTEMA_LLAMADAS[] = {
     "mem_crear", "mem_cerrar", "abrir_memoria", "cerrar_memoria", "mem_asociar", "tiene_asociacion", "imprimir_flotante",
     "comparar_gt_flt", "mem_poner_u32_ind", "mem_obtener_u32_ind", "mem_aprender_peso_reg",
     "pensar", "buscar", "imprimir_sin_salto", "pensar_respuesta", "es_variable_sistema",
-    "reforzar", "penalizar", "mem_obtener_fuerza",
+    "reforzar", "penalizar", "olvidar", "mem_obtener_fuerza", "buscar_peso",
     "asociar_pesos_conceptos", "asociar_secuencia", "registrar_patron", "pensar_siguiente",
-    "pensar_anterior", "corregir_secuencia", "asociar_relacion", "comparar_patrones",
+    "pensar_anterior", "corregir_secuencia", "buscar_asociados_rango", "asociar_relacion", "comparar_patrones",
     "asociar_similitud", "asociar_diferencia", "buscar_asociados", "asociados_de",
     "buscar_asociados_lista", "asociados_lista_de", "buscar_en_memoria", "buscar_introspectiva",
     "buscar_en_memoria_lista", "buscar_en_memoria_cs", "buscar_en_memoria_detallada",
@@ -32,7 +32,7 @@ const char *const SISTEMA_LLAMADAS[] = {
     "ventana_rastro_activacion", "rastro_activacion_ventana", "rastro_activacion_limpiar",
     "rastro_activacion_tamano", "rastro_activacion_obtener", "rastro_activacion_peso",
     "rastro_activacion_lista", "rastro_activacion_recientes",
-    "propagar_activacion", "propagar_activacion_de",
+    "propagar_activacion", "propagar_activacion_de", "obtener_secuencia",
     "elegir_por_peso", "elegir_por_peso_segun", "elegir_por_peso_id", "elegir_por_peso_semilla", "elegir_por_peso_seed",
     "resolver_conflictos", "resolver_conflictos_de",
     "segmentar_palabras", "palabras_de", "dividir_texto", "minusculas", "extraer_subtexto", "extraer_antes_de",
@@ -67,7 +67,7 @@ const char *const SISTEMA_LLAMADAS[] = {
     "tcp_conectar", "tcp_escuchar", "tcp_aceptar", "tcp_enviar", "tcp_recibir", "tcp_cerrar",
     "tls_cliente", "tls_servidor", "tls_enviar", "tls_recibir", "tls_cerrar",
     "pausa_milisegundos", "esperar_milisegundos",
-    "nativo_mlp_entrenar"
+    "nativo_mlp_entrenar", "nativo_mlp_predict", "nativo_mlp_guardar"
 };
 const size_t SISTEMA_LLAMADAS_COUNT = sizeof(SISTEMA_LLAMADAS) / sizeof(SISTEMA_LLAMADAS[0]);
 

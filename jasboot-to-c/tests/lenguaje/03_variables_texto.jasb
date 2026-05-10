@@ -1,0 +1,8 @@
+principal
+    texto nombre = "Jasboot"
+    texto version = "AOT 1.0"
+    imprimir "Lenguaje:"
+    imprimir nombre
+    imprimir "Modo:"
+    imprimir version
+fin_principal

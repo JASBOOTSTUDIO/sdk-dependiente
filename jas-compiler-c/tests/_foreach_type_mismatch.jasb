@@ -1,0 +1,7 @@
+principal
+    mapa<texto> m = mapa_crear()
+    mapa_poner(m, "a", str_desde_numero(1))
+    para cada entero v en m hacer
+        imprimir v
+    fin_para_cada
+fin_principal

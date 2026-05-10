@@ -1,0 +1,8 @@
+# Modulo auxiliar para test completo del lenguaje Jasboot
+# Probar importacion con usar/enviar
+
+funcion multiplicar_dos(entero num_a, entero num_b) retorna entero
+    retornar num_a * num_b
+fin_funcion
+
+enviar {multiplicar_dos}

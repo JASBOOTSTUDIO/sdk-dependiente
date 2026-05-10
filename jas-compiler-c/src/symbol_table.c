@@ -214,6 +214,21 @@ const char *sym_lookup_lista_elem(SymbolTable *st, const char *name) {
         SymbolEntry *e = find_in_scope(st->scopes[i - 1], name);
         if (e && e->type_name && strcmp(e->type_name, "lista") == 0 && e->lista_elem_type)
             return e->lista_elem_type;
+        if (e && e->type_name && strcmp(e->type_name, "lista?") == 0 && e->lista_elem_type)
+            return e->lista_elem_type;
+    }
+    return NULL;
+}
+
+const char *sym_lookup_collection_elem_type(SymbolTable *st, const char *name) {
+    if (!name) return NULL;
+    for (size_t i = st->scope_depth; i > 0; i--) {
+        SymbolEntry *e = find_in_scope(st->scopes[i - 1], name);
+        if (!e || !e->type_name || !e->lista_elem_type)
+            continue;
+        if (strcmp(e->type_name, "lista") == 0 || strcmp(e->type_name, "lista?") == 0 ||
+            strcmp(e->type_name, "mapa") == 0 || strcmp(e->type_name, "mapa?") == 0)
+            return e->lista_elem_type;
     }
     return NULL;
 }

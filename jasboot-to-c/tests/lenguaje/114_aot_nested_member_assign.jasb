@@ -1,0 +1,10 @@
+/* Tres niveles: mapa_poner debe usar raiz.m para mutar el mapa almacenado en raiz (no la variable nivel1 suelta). */
+principal
+    mapa raiz = mapa_crear()
+    mapa nivel1 = mapa_crear()
+    mapa_poner(raiz, "m", nivel1)
+    mapa nivel2 = mapa_crear()
+    mapa_poner(raiz.m, "n", nivel2)
+    raiz.m.n.val = 9
+    imprimir texto_desde_numero(mapa_obtener(mapa_obtener(mapa_obtener(raiz, "m"), "n"), "val"))
+fin_principal

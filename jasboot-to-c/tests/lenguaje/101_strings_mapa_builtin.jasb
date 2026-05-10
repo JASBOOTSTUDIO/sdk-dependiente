@@ -1,0 +1,16 @@
+principal
+    texto s = "abcdef"
+    imprimir extraer_subtexto(s, 2, 3)
+    imprimir contiene_texto(s, "bcd")
+    imprimir termina_con("foto.png", ".png")
+    imprimir longitud("abc")
+    texto t = texto_desde_numero(42)
+    imprimir t
+    mapa m = mapa_crear()
+    mapa_poner(m, "k", str_desde_numero(1))
+    mapa_poner(m, "S", str_desde_numero(55))
+    imprimir m
+    mapa_eliminar(m, "k")
+    imprimir m
+    imprimir str_desde_numero(mapa_tamano(m))
+fin_principal

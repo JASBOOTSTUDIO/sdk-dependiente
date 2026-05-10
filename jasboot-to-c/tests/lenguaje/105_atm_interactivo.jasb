@@ -1,0 +1,134 @@
+/*
+ * Demo de estrés AOT: cajero (ATM) con menú, PIN, listas, mapas,
+ * flotantes, seleccionar, ingresar_texto y leer_entrada,
+ * builtins (bits, math, decimal, formatear_timestamp fijo).
+ * Salida alineada con la VM: sin imprimir_sin_salto (difiere en lineas); sin(pi) evitado.
+ */
+principal
+    texto pin_guardado = "1234"
+    flotante saldo = 1000.0
+    entero salir = 0
+    entero intentos_pin = 0
+    entero autorizado = 0
+    lista historial = crear_lista()
+    mapa promo = mapa_crear()
+    mapa_poner(promo, "msg", "Bienvenido al demo AOT")
+    flotante demo_fl = 1.25
+    entero ts_demo = 1700000000
+    flotante cien_arc = 100.0
+
+    imprimir "--- Cajero automático (Jasboot → C AOT) ---"
+    imprimir mapa_obtener(promo, "msg")
+    imprimir "Ingrese su PIN (4 dígitos)."
+
+    mientras intentos_pin < 3 y autorizado == 0 hacer
+        texto pin_ing = leer_entrada()
+        si pin_ing == pin_guardado entonces
+            autorizado = 1
+        sino
+            intentos_pin = intentos_pin + 1
+            imprimir concatenar("PIN incorrecto. Intento ", texto_desde_numero(intentos_pin))
+        fin_si
+    fin_mientras
+
+    si autorizado == 0 entonces
+        imprimir "Tarjeta bloqueada. Adiós."
+        salir = 1
+    fin_si
+
+    si autorizado == 1 entonces
+        limpiar_consola()
+        imprimir "--- Acceso concedido ---"
+        texto ref = formatear_timestamp(ts_demo, "%Y-%m-%d")
+        imprimir concatenar("Operación referencia (fecha fija prueba): ", ref)
+
+        mientras salir == 0 hacer
+            imprimir "\n=== MENÚ ==="
+            imprimir "1  Consultar saldo"
+            imprimir "2  Depósito"
+            imprimir "3  Retiro"
+            imprimir "4  Historial de movimientos"
+            imprimir "5  Panel técnico (bits / math)"
+            imprimir "6  Ingreso por ingresar_texto (alias teclado)"
+            imprimir "0  Salir"
+            imprimir_sin_salto "Escriba opción y pulse Enter: "
+
+            texto linea 
+            ingresar_texto linea
+            entero op = str_a_entero(linea)
+
+            seleccionar op hacer
+                caso 1
+                    imprimir concatenar("Saldo actual: ", decimal(saldo, 2))
+                caso 2
+                    imprimir "Importe a depositar (ej. 100.50):"
+                    texto tdep = leer_entrada()
+                    flotante dep = str_a_flotante(tdep)
+                    si dep > 0.0 entonces
+                        saldo = saldo + dep
+                        lista_agregar(historial, concatenar("DEP +", tdep))
+                        imprimir "Depósito aplicado."
+                    sino
+                        imprimir "Importe inválido."
+                    fin_si
+                caso 3
+                    imprimir "Importe a retirar:"
+                    texto tre = leer_entrada()
+                    flotante ret = str_a_flotante(tre)
+                    si ret <= 0.0 entonces
+                        imprimir "Importe inválido."
+                    fin_si
+                    si ret > 0.0 entonces
+                        si ret > saldo entonces
+                            imprimir "Fondos insuficientes."
+                        fin_si
+                    fin_si
+                    si ret > 0.0 entonces
+                        si ret <= saldo entonces
+                            saldo = saldo - ret
+                            lista_agregar(historial, concatenar("RET -", tre))
+                            imprimir "Retiro realizado."
+                        fin_si
+                    fin_si
+                caso 4
+                    entero nh = lista_tamano(historial)
+                    si nh == 0 entonces
+                        imprimir "(sin movimientos)"
+                    sino
+                        imprimir "--- Historial ---"
+                        para cada texto mov en historial hacer
+                            imprimir mov
+                        fin_para_cada
+                    fin_si
+                caso 5
+                    imprimir "--- Panel técnico ---"
+                    imprimir texto_desde_numero(bit_shl(1, 8))
+                    imprimir texto_desde_numero(bit_shr(256, 4))
+                    imprimir texto_desde_numero(sin(0.0))
+                    imprimir texto_desde_numero(cos(0.0))
+                    imprimir texto_desde_numero(log10(cien_arc))
+                    imprimir texto_desde_numero(exp(0.0))
+                    imprimir concatenar("Flotante demo (decimal): ", decimal(demo_fl, 4))
+                caso 6
+                    imprimir "Escriba un alias (una línea):"
+                    texto alias
+                    ingresar_texto alias
+                    si longitud_texto(alias) == 0 entonces
+                        imprimir "(vacío ignorado)"
+                    sino
+                        imprimir concatenar("Alias recibido: ", minusculas(alias))
+                    fin_si
+                caso 0
+                    imprimir "Gracias por usar el cajero Jasboot."
+                    salir = 1
+                defecto
+                    si contiene_texto(minusculas(linea), "sal") entonces
+                        imprimir "Saliendo…"
+                        salir = 1
+                    sino
+                        imprimir "Opción no reconocida."
+                    fin_si
+            fin_seleccionar
+        fin_mientras
+    fin_si
+fin_principal

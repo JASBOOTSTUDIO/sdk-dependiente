@@ -1,0 +1,298 @@
+# Test Completo del Lenguaje Jasboot
+# Cubre: tipos, variables, constantes, operadores, funciones, registros,
+# listas, mapas, condicionales, bucles, seleccionar, clases, herencia,
+# JMN, manejo de errores, funciones de sistema, modulos
+
+usar {multiplicar_dos} de "04_test_modulo_aux.jasb"
+
+# ==================== CONSTANTES ====================
+constante entero MAX_VALOR = 100
+constante texto NOMBRE_LENGUAJE = "Jasboot"
+constante flotante PI = 3.14159
+
+# ==================== REGISTROS ====================
+registro Coordenada
+    entero pos_x
+    entero pos_y
+fin_registro
+
+# ==================== CLASES Y HERENCIA ====================
+clase Figura
+    texto nombre_figura
+
+    funcion Figura(texto param_nombre)
+        este.nombre_figura = param_nombre
+    fin_funcion
+
+    funcion describir()
+        imprimir "Figura generica: " + este.nombre_figura
+    fin_funcion
+fin_clase
+
+clase Circulo extiende Figura
+    flotante radio
+
+    funcion Circulo(texto param_nombre, flotante param_radio)
+        este.nombre_figura = param_nombre
+        este.radio = param_radio
+    fin_funcion
+
+    funcion area() retorna flotante
+        retornar PI * este.radio * este.radio
+    fin_funcion
+
+    funcion describir()
+        imprimir "Circulo: " + este.nombre_figura + " radio=" + str_desde_numero(este.radio)
+    fin_funcion
+fin_clase
+
+# ==================== FUNCIONES AUXILIARES ====================
+funcion sumar_enteros(entero num_a, entero num_b) retorna entero
+    retornar num_a + num_b
+fin_funcion
+
+funcion es_par(entero num) retorna bool
+    si num % 2 == 0 entonces
+        retornar verdadero
+    fin_si
+    retornar falso
+fin_funcion
+
+funcion concatenar_texto(texto texto_a, texto texto_b) retorna texto
+    retornar texto_a + texto_b
+fin_funcion
+
+funcion division_segura(entero numerador, entero denominador) retorna entero
+    intentar
+        retornar numerador / denominador
+    atrapar err
+        imprimir "Error division: " + err
+        retornar -999
+    fin_intentar
+fin_funcion
+
+# ==================== PRINCIPAL ====================
+principal
+    imprimir "========================================"
+    imprimir "TEST COMPLETO DEL LENGUAJE JASBOOT"
+    imprimir "========================================"
+
+    # ---------- Test 1: Variables y Tipos Basicos ----------
+    imprimir ""
+    imprimir "[TEST 1] Variables y Tipos Basicos"
+    entero entero_a = 42
+    texto texto_a = "Hola Jasboot"
+    flotante flotante_a = 3.14
+    bool bool_a = verdadero
+    bool bool_b = falso
+
+    imprimir "entero: " + str_desde_numero(entero_a)
+    imprimir "texto: " + texto_a
+    imprimir "flotante: " + str_desde_numero(flotante_a)
+    imprimir "bool verdadero: " + (bool_a ? "si" : "no")
+    imprimir "bool falso: " + (bool_b ? "si" : "no")
+
+    # ---------- Test 2: Constantes ----------
+    imprimir ""
+    imprimir "[TEST 2] Constantes"
+    imprimir "MAX_VALOR: " + str_desde_numero(MAX_VALOR)
+    imprimir "NOMBRE_LENGUAJE: " + NOMBRE_LENGUAJE
+    imprimir "PI: " + str_desde_numero(PI)
+
+    # ---------- Test 3: Operadores Aritmeticos ----------
+    imprimir ""
+    imprimir "[TEST 3] Operadores Aritmeticos"
+    entero op_suma = 10 + 5
+    entero op_resta = 10 - 3
+    entero op_mult = 6 * 7
+    entero op_div = 20 / 4
+    entero op_mod = 17 % 5
+    imprimir "10+5=" + str_desde_numero(op_suma)
+    imprimir "10-3=" + str_desde_numero(op_resta)
+    imprimir "6*7=" + str_desde_numero(op_mult)
+    imprimir "20/4=" + str_desde_numero(op_div)
+    imprimir "17%5=" + str_desde_numero(op_mod)
+
+    # ---------- Test 4: Operadores de Comparacion ----------
+    imprimir ""
+    imprimir "[TEST 4] Comparaciones"
+    si 5 > 3 entonces
+        imprimir "5 mayor que 3: SI"
+    fin_si
+    si 2 < 10 entonces
+        imprimir "2 menor que 10: SI"
+    fin_si
+    si 7 == 7 entonces
+        imprimir "7 igual a 7: SI"
+    fin_si
+    si 4 != 9 entonces
+        imprimir "4 distinto de 9: SI"
+    fin_si
+    si 6 >= 6 entonces
+        imprimir "6 mayor o igual 6: SI"
+    fin_si
+    si 3 <= 8 entonces
+        imprimir "3 menor o igual 8: SI"
+    fin_si
+
+    # ---------- Test 5: Operadores Logicos ----------
+    imprimir ""
+    imprimir "[TEST 5] Operadores Logicos"
+    si verdadero y verdadero entonces
+        imprimir "verdadero y verdadero: SI"
+    fin_si
+    si falso o verdadero entonces
+        imprimir "falso o verdadero: SI"
+    fin_si
+    si no falso entonces
+        imprimir "no falso: SI"
+    fin_si
+
+    # ---------- Test 6: Funciones de Usuario ----------
+    imprimir ""
+    imprimir "[TEST 6] Funciones de Usuario"
+    entero suma_res = sumar_enteros(15, 25)
+    imprimir "sumar_enteros(15,25)=" + str_desde_numero(suma_res)
+    si es_par(8) entonces
+        imprimir "es_par(8): SI"
+    fin_si
+    si no es_par(7) entonces
+        imprimir "es_par(7): NO"
+    fin_si
+    texto concat_res = concatenar_texto("Hola ", "Mundo")
+    imprimir "concatenar: " + concat_res
+
+    # ---------- Test 7: Modulos (usar/enviar) ----------
+    imprimir ""
+    imprimir "[TEST 7] Modulos"
+    entero mult_res = multiplicar_dos(6, 7)
+    imprimir "multiplicar_dos(6,7)=" + str_desde_numero(mult_res)
+
+    # ---------- Test 8: Condicionales si/sino ----------
+    imprimir ""
+    imprimir "[TEST 8] Condicionales"
+    entero puntaje = 75
+    si puntaje >= 90 entonces
+        imprimir "Calificacion: A"
+    sino si puntaje >= 80 entonces
+        imprimir "Calificacion: B"
+    sino si puntaje >= 70 entonces
+        imprimir "Calificacion: C"
+    sino
+        imprimir "Calificacion: D"
+    fin_si
+
+    # ---------- Test 9: Bucle mientras ----------
+    imprimir ""
+    imprimir "[TEST 9] Bucle mientras"
+    entero contador = 1
+    mientras contador <= 5 hacer
+        imprimir "Iteracion: " + str_desde_numero(contador)
+        contador = contador + 1
+    fin_mientras
+
+    # ---------- Test 10: Seleccionar ----------
+    imprimir ""
+    imprimir "[TEST 10] Seleccionar"
+    entero opcion = 2
+    seleccionar opcion hacer
+        caso 1
+            imprimir "Opcion: Uno"
+        caso 2
+            imprimir "Opcion: Dos"
+        caso 3
+            imprimir "Opcion: Tres"
+        defecto
+            imprimir "Opcion: Otra"
+    fin_seleccionar
+
+    # ---------- Test 11: Registros ----------
+    imprimir ""
+    imprimir "[TEST 11] Registros"
+    Coordenada punto_a
+    punto_a.pos_x = 10
+    punto_a.pos_y = 20
+    imprimir "Coordenada: x=" + str_desde_numero(punto_a.pos_x) + " y=" + str_desde_numero(punto_a.pos_y)
+
+    # ---------- Test 12: Listas ----------
+    imprimir ""
+    imprimir "[TEST 12] Listas"
+    lista lista_numeros = crear_lista()
+    lista_agregar(lista_numeros, 100)
+    lista_agregar(lista_numeros, 200)
+    lista_agregar(lista_numeros, 300)
+    entero tam_lista = lista_tamano(lista_numeros)
+    imprimir "Tamano lista: " + str_desde_numero(tam_lista)
+    entero indice = 0
+    mientras indice < tam_lista hacer
+        entero elem_actual = lista_obtener(lista_numeros, indice)
+        imprimir "Lista[" + str_desde_numero(indice) + "]=" + str_desde_numero(elem_actual)
+        indice = indice + 1
+    fin_mientras
+
+    # ---------- Test 13: Mapas ----------
+    imprimir ""
+    imprimir "[TEST 13] Mapas"
+    mapa mapa_config = mapa_crear()
+    mapa_poner(mapa_config, "lenguaje", "Jasboot")
+    mapa_poner(mapa_config, "version", "1.0")
+    texto val_lenguaje = mapa_obtener(mapa_config, "lenguaje")
+    texto val_version = mapa_obtener(mapa_config, "version")
+    imprimir "Mapa[lenguaje]=" + val_lenguaje
+    imprimir "Mapa[version]=" + val_version
+
+    # ---------- Test 14: Clases y Herencia ----------
+    imprimir ""
+    imprimir "[TEST 14] Clases y Herencia"
+    Figura figura_generica = Figura("Base")
+    figura_generica.describir()
+    Circulo circulo_rojo = Circulo("Rojo", 5.0)
+    circulo_rojo.describir()
+    flotante area_circulo = circulo_rojo.area()
+    imprimir "Area del circulo: " + str_desde_numero(area_circulo)
+
+    # ---------- Test 15: JMN (Memoria Neuronal) ----------
+    imprimir ""
+    imprimir "[TEST 15] Memoria Neuronal JMN"
+    crear_memoria("test_completo.jmn")
+    recordar "clave_test" con valor "valor_test"
+    recordar "numero_test" con valor 123
+    buscar "clave_test"
+    imprimir "Buscar clave_test: " + resultado
+    buscar "numero_test"
+    imprimir "Buscar numero_test: " + resultado
+    asociar "concepto_a" con "concepto_b"
+    cerrar_memoria()
+
+    # ---------- Test 16: Manejo de Errores ----------
+    imprimir ""
+    imprimir "[TEST 16] Manejo de Errores"
+    entero div_ok = division_segura(100, 5)
+    imprimir "100/5=" + str_desde_numero(div_ok)
+    entero div_err = division_segura(100, 0)
+    imprimir "100/0=" + str_desde_numero(div_err)
+
+    # ---------- Test 17: Funciones de Sistema ----------
+    imprimir ""
+    imprimir "[TEST 17] Funciones de Sistema"
+    entero ts = obtener_timestamp()
+    imprimir "Timestamp: " + str_desde_numero(ts)
+    texto txt_demo = "Jasboot"
+    entero len_txt = longitud(txt_demo)
+    imprimir "Longitud de '" + txt_demo + "': " + str_desde_numero(len_txt)
+    texto txt_unido = concatenar("Hola ", "Jasboot")
+    imprimir "Concatenar: " + txt_unido
+
+    # ---------- Test 18: Ternario ----------
+    imprimir ""
+    imprimir "[TEST 18] Ternario"
+    entero edad = 20
+    texto estado = (edad >= 18) ? "adulto" : "menor"
+    imprimir "Edad 20 es: " + estado
+
+    # ---------- Resumen ----------
+    imprimir ""
+    imprimir "========================================"
+    imprimir "TEST COMPLETO FINALIZADO"
+    imprimir "========================================"
+fin_principal
