@@ -488,6 +488,18 @@ static void gen_call(GenCtx *g, CallNode *c) {
         fputc(')', o);
         return;
     }
+    if (strcmp(nm, "sin") == 0 && c->n_args >= 1) {
+        fputs("jb_sin(", o);
+        gen_expr(g, c->args[0]);
+        fputc(')', o);
+        return;
+    }
+    if (strcmp(nm, "cos") == 0 && c->n_args >= 1) {
+        fputs("jb_cos(", o);
+        gen_expr(g, c->args[0]);
+        fputc(')', o);
+        return;
+    }
     if (strcmp(nm, "log10") == 0 && c->n_args >= 1) {
         fputs("jb_log10(", o);
         gen_expr(g, c->args[0]);
@@ -776,6 +788,12 @@ static void gen_call(GenCtx *g, CallNode *c) {
     if (strcmp(nm, "str_desde_numero") == 0) {
         fputs("jb_entero_a_texto(", o);
         if (c->n_args > 0) gen_expr(g, c->args[0]);
+        fputc(')', o);
+        return;
+    }
+    if (strcmp(nm, "minusculas") == 0 && c->n_args >= 1) {
+        fputs("jb_minusculas(", o);
+        gen_expr(g, c->args[0]);
         fputc(')', o);
         return;
     }

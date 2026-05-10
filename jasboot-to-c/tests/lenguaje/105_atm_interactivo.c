@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
                 else if (jb_truthy(jb_eq(__sel, jb_new_entero(2)))) {
                     jb_imprimir(jb_new_texto("Importe a depositar (ej. 100.50):"));
                     jb_var_t tdep = jb_leer_entrada();
-                    jb_var_t dep = (jb_warn_aot("llamada AOT no implementada: str_a_flotante"), jb_new_nulo());
+                    jb_var_t dep = jb_str_a_flotante(tdep);
                     if (jb_truthy(jb_gt(dep, jb_new_flotante(0)))) {
                         jb_assign(&saldo, jb_add(saldo, dep));
                         jb_list_push(&historial, jb_concat(jb_new_texto("DEP +"), tdep));
@@ -73,7 +73,7 @@ int main(int argc, char **argv) {
                 else if (jb_truthy(jb_eq(__sel, jb_new_entero(3)))) {
                     jb_imprimir(jb_new_texto("Importe a retirar:"));
                     jb_var_t tre = jb_leer_entrada();
-                    jb_var_t ret = (jb_warn_aot("llamada AOT no implementada: str_a_flotante"), jb_new_nulo());
+                    jb_var_t ret = jb_str_a_flotante(tre);
                     if (jb_truthy(jb_le(ret, jb_new_flotante(0)))) {
                         jb_imprimir(jb_new_texto("Importe inválido."));
                     }
@@ -110,8 +110,8 @@ int main(int argc, char **argv) {
                     jb_imprimir(jb_new_texto("--- Panel técnico ---"));
                     jb_imprimir(jb_texto_desde_numero(jb_bit_shl(jb_new_entero(1), jb_new_entero(8))));
                     jb_imprimir(jb_texto_desde_numero(jb_bit_shr(jb_new_entero(256), jb_new_entero(4))));
-                    jb_imprimir(jb_texto_desde_numero((jb_warn_aot("llamada AOT no implementada: sin"), jb_new_nulo())));
-                    jb_imprimir(jb_texto_desde_numero((jb_warn_aot("llamada AOT no implementada: cos"), jb_new_nulo())));
+                    jb_imprimir(jb_texto_desde_numero(jb_sin(jb_new_flotante(0))));
+                    jb_imprimir(jb_texto_desde_numero(jb_cos(jb_new_flotante(0))));
                     jb_imprimir(jb_texto_desde_numero(jb_log10(cien_arc)));
                     jb_imprimir(jb_texto_desde_numero(jb_exp(jb_new_flotante(0))));
                     jb_imprimir(jb_concat(jb_new_texto("Flotante demo (decimal): "), jb_decimal(demo_fl, jb_new_entero(4))));
@@ -123,7 +123,7 @@ int main(int argc, char **argv) {
                     if (jb_truthy(jb_eq(jb_texto_len(alias), jb_new_entero(0)))) {
                         jb_imprimir(jb_new_texto("(vacío ignorado)"));
                     } else {
-                        jb_imprimir(jb_concat(jb_new_texto("Alias recibido: "), (jb_warn_aot("llamada AOT no implementada: minusculas"), jb_new_nulo())));
+                        jb_imprimir(jb_concat(jb_new_texto("Alias recibido: "), jb_minusculas(alias)));
                     }
                 }
                 else if (jb_truthy(jb_eq(__sel, jb_new_entero(0)))) {
@@ -131,7 +131,7 @@ int main(int argc, char **argv) {
                     jb_assign(&salir, jb_new_entero(1));
                 }
                 else {
-                    if (jb_truthy(jb_contiene_texto((jb_warn_aot("llamada AOT no implementada: minusculas"), jb_new_nulo()), jb_new_texto("sal")))) {
+                    if (jb_truthy(jb_contiene_texto(jb_minusculas(linea), jb_new_texto("sal")))) {
                         jb_imprimir(jb_new_texto("Saliendo…"));
                         jb_assign(&salir, jb_new_entero(1));
                     } else {

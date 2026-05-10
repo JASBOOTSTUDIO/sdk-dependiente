@@ -3756,6 +3756,20 @@ int vm_step(VM* vm) {
             break;
         }
 
+        case OP_MEM_MAPA_BORRAR: {
+#ifdef JASBOOT_LANG_INTEGRATION
+            uint32_t map_id = (uint32_t)a_val;
+            uint32_t key_id = (uint32_t)b_val;
+            JMNMemoria* m_target = (vm->mem_neuronal && jmn_mapa_existe(vm->mem_neuronal, map_id))
+                                   ? vm->mem_neuronal : vm->mem_colecciones;
+            if (!m_target) { ensure_jmn_col(vm); m_target = vm->mem_colecciones; }
+            if (m_target)
+                jmn_mapa_eliminar(m_target, map_id, key_id);
+#endif
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+
         case OP_IR: {
             if (inst.flags & IR_INST_FLAG_A_IMMEDIATE) {
                 uint32_t target = vm_decode_u24(inst.operand_a, inst.operand_b, inst.operand_c, inst.flags);
@@ -4529,6 +4543,13 @@ int vm_step(VM* vm) {
             }
 #endif
             vm_set_register(vm, inst.operand_a, 1u);
+            vm->pc += IR_INSTRUCTION_SIZE;
+            break;
+        }
+
+        case OP_IMPRIMIR_BOOLEANO: {
+            uint64_t v = vm_get_register(vm, inst.operand_a);
+            vm_escribir_cadena(v ? "verdadero" : "falso");
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
         }
@@ -5353,6 +5374,7 @@ int vm_step(VM* vm) {
                 float factor = (float)fc / 100.0f;
                 float umbral = (float)uc / 1000.0f;
                 jmn_consolidar_memoria_sueno(vm->mem_neuronal, factor, 1, umbral, 0.05f);
+                jmn_finalizar_escritura(vm->mem_neuronal);
                 vm_set_register(vm, inst.operand_a, 1);
             } else {
                 vm_set_register(vm, inst.operand_a, 0);
