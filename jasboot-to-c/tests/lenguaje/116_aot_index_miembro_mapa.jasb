@@ -1,0 +1,10 @@
+/* Asignacion indexada sobre ruta mapa: m.L[i] = v (paridad VM / AOT). */
+principal
+    mapa m = mapa_crear()
+    lista lst = lista_crear()
+    mapa_poner(m, "L", lst)
+    lista_agregar(m.L, 10)
+    lista_agregar(m.L, 20)
+    m.L[1] = 77
+    imprimir lista_obtener(m.L, 1)
+fin_principal

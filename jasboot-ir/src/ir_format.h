@@ -92,6 +92,10 @@ typedef enum {
     OP_DEBUG_LINE = 0x07,  // Guarda línea actual en estado de la VM (B|C)
     /* A <- MSE float (ultimo epoch); B = registro base de 7 args (pesos_id, sesgos_id, X_id, y_id, capas_id, lr f32, epochs u32). */
     OP_ANALITICA_MLP_FIT = 0x08,
+    OP_ANALITICA_MLP_PREDICT = 0x09,
+    OP_ANALITICA_MLP_SAVE = 0x0A,
+    OP_MEM_PENALIZAR = 0x0E,
+    OP_IMPRIMIR_BOOLEANO = 0x0F,
     
     // Aritmética
     OP_SUMAR = 0x10,       // A ← B + C
@@ -225,6 +229,7 @@ typedef enum {
     OP_MEM_MAPA_PONER = 0x62,        // SetMap(A:map_id, B:key_id, C:val_reg)
     OP_MEM_MAPA_OBTENER = 0x63,      // A <- GetMap(B:map_id, C:key_id)
     OP_MEM_MAPA_TAMANO = 0x7E,       // A <- count entries (B: map_id reg)
+    OP_MEM_MAPA_BORRAR = 0xE3,
     OP_MEM_MAPA_LLAVES = 0x0C,       // A <- lista_id con llaves (B: map_id reg)
     OP_MEM_MAPA_CONTIENE = 0x0D,     // A <- 1 if key C exists in map B, else 0
     OP_FS_LEER_BYTE = 0x64,          // A <- fgetc(handle B)
@@ -298,7 +303,6 @@ typedef enum {
     
     OP_MEM_ASOCIAR = 0xE8,           // Crear asociación entre dos conceptos
     OP_MEM_ECO = 0xFD,               // Eco de concepto (imitación)
-    OP_MEM_PENALIZAR = 0xE3,         // Penalizar peso de asociación
     OP_TCP_ENVIAR = 0x19,            // A <- enviar socket B, payload bytes/texto C
     OP_TCP_RECIBIR = 0x1A,           // A <- bytes recibidos de socket B hasta max C
     OP_TCP_CERRAR = 0x1B,            // Cerrar socket en A

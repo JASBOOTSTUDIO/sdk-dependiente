@@ -1,0 +1,19 @@
+/* AOT vec/mat: longitud, normalizar de eje canonico, mat4 identidad * vec4 */
+principal
+    vec3 vector_c = vec3(3.0, 4.0, 0.0)
+    imprimir "vec_mat_ok"
+    flotante len = vec3_longitud(vector_c)
+    imprimir_flotante(len)
+    vec3 eje = vec3(1.0, 0.0, 0.0)
+    vec3 u = vec3(0.0, 0.0, 0.0)
+    vec3_normalizar(u, eje)
+    imprimir_flotante(u.x)
+    imprimir_flotante(u.y)
+    mat4 M
+    mat4_identidad(M)
+    vec4 v = vec4(1.0, 0.0, 0.0, 1.0)
+    vec4 sal = vec4(0.0, 0.0, 0.0, 0.0)
+    mat4_mul_vec4(sal, M, v)
+    imprimir_flotante(sal.x)
+    imprimir_flotante(sal.w)
+fin_principal

@@ -230,6 +230,22 @@ void jmn_mapa_insertar(JMNMemoria* mem, uint32_t map_id, uint32_t key, JMNValor 
     }
 }
 
+void jmn_mapa_eliminar(JMNMemoria* mem, uint32_t map_id, uint32_t key) {
+    if (!mem || !mem->mapas) return;
+    uint32_t slot = map_id % 10000u;
+    if (!mem->mapas[slot].keys || mem->mapas[slot].count == 0) return;
+    for (uint32_t i = 0; i < mem->mapas[slot].count; i++) {
+        if (mem->mapas[slot].keys[i] != key) continue;
+        for (uint32_t j = i + 1; j < mem->mapas[slot].count; j++) {
+            mem->mapas[slot].keys[j - 1] = mem->mapas[slot].keys[j];
+            mem->mapas[slot].vals[j - 1] = mem->mapas[slot].vals[j];
+        }
+        mem->mapas[slot].count--;
+        if (!mem->es_ram) mem->dirty = 1;
+        return;
+    }
+}
+
 int jmn_mapa_obtener_si_existe(JMNMemoria* mem, uint32_t map_id, uint32_t key, JMNValor* out) {
     JMNValor z = {0};
     if (!mem || !mem->mapas) {

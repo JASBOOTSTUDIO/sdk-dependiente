@@ -1,0 +1,7 @@
+principal
+    entero a = 10
+    entero b = 20
+    entero suma = a + b
+    imprimir "La suma de 10 + 20 es:"
+    imprimir suma
+fin_principal

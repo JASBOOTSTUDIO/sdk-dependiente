@@ -1,0 +1,15 @@
+/* Modulo 2/3: operaciones JSON reutilizables. */
+enviar funcion pl_json_texto_inicial(entero modo) retorna texto
+    retornar "{\"version\":1,\"items\":[{\"id\":1,\"nombre\":\"alfa\"},{\"id\":2,\"nombre\":\"beta\"}],\"blob_meta\":{\"bytes\":4}}"
+fin_funcion
+
+enviar funcion pl_json_tipar_raiz(texto raw) retorna entero
+    objeto j = json_parse(raw)
+    retornar json_tipo(j)
+fin_funcion
+
+enviar funcion pl_json_conteo_items(texto raw) retorna entero
+    objeto j = json_parse(raw)
+    entero arr = json_objeto_obtener(j, "items")
+    retornar json_lista_tamano(arr)
+fin_funcion

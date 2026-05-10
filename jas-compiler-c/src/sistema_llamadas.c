@@ -10,7 +10,7 @@ const char *const SISTEMA_LLAMADAS[] = {
     "listar_archivos", "fs_listar", "finalizar", "olvidar", "obtener_campo", "bit_shl", "bit_shr",
     "sistema_ejecutar", "mapa_crear", "mapa_poner", "mapa_obtener", "mapa_eliminar", "mapa_tamano", "mapa_contiene",
     "str_a_entero", "str_a_flotante", "convertir_entero", "convertir_flotante", "fs_abrir", "fs_cerrar", "fs_escribir", "fs_leer_linea",
-    "fs_leer_byte", "fs_escribir_byte", "fs_leer_texto", "sys_argc", "sys_argv", "str_extraer_caracter", "str_desde_numero", "decimal", "codigo_caracter", "caracter_a_texto",
+    "fs_leer_byte", "fs_escribir_byte", "fs_leer_texto", "sys_argc", "sys_argv", "str_extraer_caracter", "str_desde_numero", "texto_desde_numero", "decimal", "codigo_caracter", "caracter_a_texto",
     "byte_a_caracter", "caracter_a_byte",
     "lista_crear", "mem_lista_crear", "mem_lista_agregar", "mem_lista_obtener", "mem_lista_tamano", "lista_poner", "mem_lista_poner",
     "lista_limpiar", "mem_lista_limpiar",
@@ -67,7 +67,7 @@ const char *const SISTEMA_LLAMADAS[] = {
     "tcp_conectar", "tcp_escuchar", "tcp_aceptar", "tcp_enviar", "tcp_recibir", "tcp_cerrar",
     "tls_cliente", "tls_servidor", "tls_enviar", "tls_recibir", "tls_cerrar",
     "pausa_milisegundos", "esperar_milisegundos",
-    "nativo_mlp_entrenar"
+    "nativo_mlp_entrenar", "nativo_mlp_predict", "nativo_mlp_guardar"
 };
 const size_t SISTEMA_LLAMADAS_COUNT = sizeof(SISTEMA_LLAMADAS) / sizeof(SISTEMA_LLAMADAS[0]);
 

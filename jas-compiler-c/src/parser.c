@@ -62,6 +62,7 @@ static void format_token_desc(const Token *t, char *buf, size_t buflen) {
 }
 
 static void set_error_vc(Parser *p, int loc_line, int loc_col, const char *fmt, va_list ap) {
+    if (p->last_error) return;
     char head[3072];
     vsnprintf(head, sizeof head, fmt, ap);
     char *final;
@@ -70,7 +71,6 @@ static void set_error_vc(Parser *p, int loc_line, int loc_col, const char *fmt, 
     else
         final = strdup(head);
     if (!final) final = strdup(head);
-    if (p->last_error) free(p->last_error);
     p->last_error = final;
 }
 
@@ -2802,8 +2802,37 @@ static ASTNode *parse_block(Parser *p, const char **end_kw, size_t n_end) {
                 const Token *err_t = peek(p, 0);
                 if (err_t && err_t->type == TOK_KEYWORD && err_t->value.str) {
                     if (strncmp(err_t->value.str, "fin_", 4) == 0) {
+                        int matches_any = 0;
+                        for (size_t k = 0; k < n_end; k++) {
+                            if (strcmp(err_t->value.str, end_kw[k]) == 0) {
+                                matches_any = 1;
+                                break;
+                            }
+                        }
+                        if (matches_any) break;
+                        
+                        // Si es un `fin_` que no corresponde a este bloque, es un error estructural.
+                        if (!p->last_error) {
+                            if (p->source_path && p->source_path[0])
+                                set_error_at(p, err_t->line, err_t->column,
+                                          "Archivo %s, linea %d, columna %d: se encontro `%s` inesperado. ¿Falta cerrar un bloque anterior?",
+                                          p->source_path, err_t->line, err_t->column, err_t->value.str);
+                            else
+                                set_error_at(p, err_t->line, err_t->column,
+                                          "linea %d, columna %d: se encontro `%s` inesperado. ¿Falta cerrar un bloque anterior?",
+                                          err_t->line, err_t->column, err_t->value.str);
+                        }
                         break;
                     } else if (strcmp(err_t->value.str, "sino") == 0) {
+                        int matches_sino = 0;
+                        for (size_t k = 0; k < n_end; k++) {
+                            if (strcmp(end_kw[k], "sino") == 0) {
+                                matches_sino = 1;
+                                break;
+                            }
+                        }
+                        if (matches_sino) break;
+
                         if (p->source_path && p->source_path[0])
                             set_error_at(p, err_t->line, err_t->column, 
                                      "Archivo %s, linea %d, columna %d: Error de sintaxis: se encontro 'sino' sin un 'si' o 'cuando' previo correspondiente.", p->source_path, err_t->line, err_t->column);
@@ -4795,18 +4824,21 @@ static ASTNode *parse_function(Parser *p, int is_exported, int is_async) {
         }
     }
     const char *ends[] = {"fin_funcion"};
+    int initial_error_count = p->error_count;
     ASTNode *body = parse_block(p, ends, 1);
     
     // Check if we encountered an error while parsing the body and didn't find fin_funcion
     if (!match(p, TOK_KEYWORD, "fin_funcion")) {
-        if (p->source_path && p->source_path[0])
-            set_error_at(p, func_tok ? func_tok->line : 0, func_tok ? func_tok->column : 0,
-                      "Archivo %s, linea %d, columna %d: bloque de `funcion` sin cierre. Falta `fin_funcion`.",
-                      p->source_path, func_tok ? func_tok->line : 0, func_tok ? func_tok->column : 0);
-        else
-            set_error_at(p, func_tok ? func_tok->line : 0, func_tok ? func_tok->column : 0,
-                      "linea %d, columna %d: bloque de `funcion` sin cierre. Falta `fin_funcion`.",
-                      func_tok ? func_tok->line : 0, func_tok ? func_tok->column : 0);
+        if (p->error_count == initial_error_count && !p->last_error) {
+            if (p->source_path && p->source_path[0])
+                set_error_at(p, func_tok ? func_tok->line : 0, func_tok ? func_tok->column : 0,
+                          "Archivo %s, linea %d, columna %d: bloque de `funcion` sin cierre. Falta `fin_funcion`.",
+                          p->source_path, func_tok ? func_tok->line : 0, func_tok ? func_tok->column : 0);
+            else
+                set_error_at(p, func_tok ? func_tok->line : 0, func_tok ? func_tok->column : 0,
+                          "linea %d, columna %d: bloque de `funcion` sin cierre. Falta `fin_funcion`.",
+                          func_tok ? func_tok->line : 0, func_tok ? func_tok->column : 0);
+        }
         
         // Let it fall through, or free and return NULL?
         // We probably want to return NULL so the error propagates

@@ -1,0 +1,15 @@
+/* Paridad VM vs AOT: bits, subtexto (2 args), copiar texto, caracteres, exponencial/log en punto fijo legible. */
+principal
+    imprimir bit_shl(1, 4)
+    imprimir bit_shr(16, 4)
+    texto s = "abcdef"
+    imprimir extraer_subtexto(s, 2)
+    imprimir codigo_caracter("A")
+    imprimir caracter_a_texto(65)
+    imprimir str_extraer_caracter("hi", 0)
+    texto u = copiar_texto("z")
+    imprimir u
+    flotante cien = 100.0
+    imprimir texto_desde_numero(exp(0))
+    imprimir texto_desde_numero(log10(cien))
+fin_principal

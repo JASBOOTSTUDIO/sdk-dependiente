@@ -1,0 +1,9 @@
+principal
+    crear_memoria("sdk-dependiente/jasboot-to-c/tests/lenguaje/117_mem.jmn")
+    define_concepto "ia" como "inteligencia"
+    asociar "ia" con "ml" con peso 0.7
+    aprender "ia" con peso 0.2
+    buscar "ia"
+    imprimir resultado
+    cerrar_memoria()
+fin_principal

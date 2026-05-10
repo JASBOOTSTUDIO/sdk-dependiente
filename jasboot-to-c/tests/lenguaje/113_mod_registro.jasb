@@ -1,0 +1,5 @@
+/* Registro exportado (fusion usar en jbc y jbc-to-c). */
+enviar registro Punto
+    entero x
+    entero yy
+fin_registro

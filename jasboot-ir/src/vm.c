@@ -4133,7 +4133,7 @@ int vm_step(VM* vm) {
                     vm_set_register(vm, inst.operand_a, (uint64_t)id);
                 }
             } else {
-                vm_set_register(vm, inst.operand_a, (uint64_t)id);
+                vm_set_register(vm, inst.operand_a, 5381); // "" si no hay texto
             }
             vm->pc += IR_INSTRUCTION_SIZE;
             break;
@@ -7465,35 +7465,30 @@ int vm_step(VM* vm) {
                     return 0;
                 }
                 int n = jmn_buscar_asociaciones(vm->mem_neuronal, key_id, 1, 0.01f, 1, res, 32);
-                uint32_t chosen = key_id;
+                uint32_t chosen = 5381; // Por defecto cadena vacía si no hay asociaciones
                 if (n > 0) {
-                    int picked = 0;
                     for (int i = 0; i < n; i++) {
                         uint32_t cand = res[i].id;
                         if (cand == 0 || cand == key_id) continue;
                         const char* ct = vm_text_cache_get(vm, cand);
                         if (ct && ct[0]) {
                             chosen = cand;
-                            picked = 1;
                             break;
                         }
                         char buf_txt[512];
                         if (jmn_obtener_texto(vm->mem_neuronal, cand, buf_txt, sizeof(buf_txt)) >= 0 && buf_txt[0]) {
                             vm_text_cache_put(vm, cand, buf_txt);
                             chosen = cand;
-                            picked = 1;
                             break;
                         }
                     }
-                    if (!picked) chosen = key_id;
                 }
                 vm_set_register(vm, inst.operand_a, (uint64_t)chosen);
             } else {
-                uint64_t key = vm_get_register(vm, inst.operand_b);
-                vm_set_register(vm, inst.operand_a, key);
+                vm_set_register(vm, inst.operand_a, 5381); // "" si no hay JMN
             }
 #else
-            vm_set_register(vm, inst.operand_a, vm_get_register(vm, inst.operand_b));
+            vm_set_register(vm, inst.operand_a, 5381); // "" si no hay integración
 #endif
             vm_percepcion_push(vm, (uint32_t)vm_get_register(vm, inst.operand_a));
             vm->pc += IR_INSTRUCTION_SIZE;

@@ -1,0 +1,20 @@
+/* Paridad VM vs AOT: abrir/cerrar/escribir/leer/fin/existe archivos (fs_*). */
+principal
+    /* Ruta relativa al cwd: funciona al ejecutar el .exe desde tests/lenguaje o desde la raíz del repo */
+    texto ruta = "tmp_107_fs.txt"
+    entero h = abrir_archivo(ruta, "w")
+    escribir_archivo("prueba con jasboot-to-c\n", h)
+    escribir_archivo("uno\n", h)
+    escribir_archivo("dos\n", h)
+    escribir_archivo("tres\n", h)
+    cerrar_archivo(h)
+
+    imprimir existe_archivo(ruta)
+
+    h = fs_abrir(ruta, "r")
+    imprimir fs_leer_linea(h)
+    imprimir fs_leer_linea(h)
+    texto l3 = fs_leer_linea(h)
+    imprimir str_desde_numero(longitud_texto(l3))
+    fs_cerrar(h)
+fin_principal

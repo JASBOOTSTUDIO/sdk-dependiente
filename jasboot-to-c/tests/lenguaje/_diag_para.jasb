@@ -1,0 +1,7 @@
+principal
+    entero idx
+    para idx = 0 mientras idx < 3 con idx++ hacer
+        imprimir idx
+        # idx = idx + 1
+    fin_para
+fin_principal

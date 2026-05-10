@@ -1674,6 +1674,7 @@ static int reject_funcion_in_display_context(CodeGen *cg, const char *t, int ctx
 static const char *get_return_type_from_block(CodeGen *cg, ASTNode *node);
 static const char *get_expression_type(CodeGen *cg, ASTNode *node);
 static int emit_print_plus_is_string_concat(CodeGen *cg, ASTNode *expr);
+static int tipo_imprimir_es_bool(const char *t);
 
 static const char *get_return_type_from_block(CodeGen *cg, ASTNode *node) {
     if (!node) return NULL;
@@ -1727,7 +1728,10 @@ static const char *get_expression_type(CodeGen *cg, ASTNode *node) {
     if (!node) return "elemento";
     if (is_node(node, NODE_LITERAL)) {
         LiteralNode *ln = (LiteralNode *)node;
-        if (ln->type_name) return ln->type_name;
+        if (ln->type_name) {
+            if (strcmp(ln->type_name, "bool") == 0) return "booleano";
+            return ln->type_name;
+        }
         if (ln->is_float) return "flotante";
         return "entero";
     }
@@ -1744,8 +1748,17 @@ static const char *get_expression_type(CodeGen *cg, ASTNode *node) {
         return t ? t : "elemento";
     }
     if (is_node(node, NODE_BINARY_OP)) {
-        const char *lt = get_expression_type(cg, ((BinaryOpNode*)node)->left);
-        const char *rt = get_expression_type(cg, ((BinaryOpNode*)node)->right);
+        BinaryOpNode *bop = (BinaryOpNode*)node;
+        if (bop->operator) {
+            const char *op = bop->operator;
+            if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 ||
+                strcmp(op, "<") == 0 || strcmp(op, ">") == 0 ||
+                strcmp(op, "<=") == 0 || strcmp(op, ">=") == 0 ||
+                strcmp(op, "y") == 0 || strcmp(op, "o") == 0)
+                return "booleano";
+        }
+        const char *lt = get_expression_type(cg, bop->left);
+        const char *rt = get_expression_type(cg, bop->right);
         if (lt && strcmp(lt, "flotante") == 0) return "flotante";
         if (rt && strcmp(rt, "flotante") == 0) return "flotante";
         if (lt && strcmp(lt, "texto") == 0) return "texto";
@@ -1957,6 +1970,9 @@ static const char *get_expression_type(CodeGen *cg, ASTNode *node) {
                 if (cg->ext_func_names[i] && strcmp(cg->ext_func_names[i], cn->name) == 0)
                     return cg->ext_func_return_types[i] ? cg->ext_func_return_types[i] : "elemento";
         }
+        if (cn->name && (strcmp(cn->name, "contiene_texto") == 0 || strcmp(cn->name, "termina_con") == 0 ||
+                         strcmp(cn->name, "mapa_contiene") == 0 || strcmp(cn->name, "json_a_bool") == 0))
+            return "booleano";
         return "elemento";
     }
     if (is_node(node, NODE_BLOCK)) {
@@ -2397,6 +2413,9 @@ static const char *get_member_chain_type(CodeGen *cg, ASTNode *node) {
         MemberAccessNode *man = (MemberAccessNode*)node;
         const char *base_type = get_member_chain_type(cg, man->target);
         if (base_type) {
+            /* Mapa dinamico (o valor generico): encadenar .clave sigue siendo mapa para asignacion/lectura. */
+            if (strcmp(base_type, "mapa") == 0 || strcmp(base_type, "elemento") == 0)
+                return "mapa";
             size_t off = 0;
             const char *ft = NULL;
             size_t fsz = 0;
@@ -3143,6 +3162,38 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
         visit_expression(cg, ARG5, B0 + 5);
         visit_expression(cg, ARG6, B0 + 6);
         emit(cg, OP_ANALITICA_MLP_FIT, (uint8_t)dest_reg, (uint8_t)B0, 0,
+             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "nativo_mlp_predict") == 0) {
+        if (cn->n_args != 3) {
+            codegen_error_sistema_incorporada_arity(
+                cg, cn, 3,
+                "pesos, sesgos, vector_x",
+                "nativo_mlp_predict(pesos, sesgos, x)", NULL);
+            return 1;
+        }
+        const int B0 = 40;
+        visit_expression(cg, ARG0, B0);
+        visit_expression(cg, ARG1, B0 + 1);
+        visit_expression(cg, ARG2, B0 + 2);
+        emit(cg, OP_ANALITICA_MLP_PREDICT, (uint8_t)dest_reg, (uint8_t)B0, 0,
+             IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
+        return 1;
+    }
+    if (strcmp(name, "nativo_mlp_guardar") == 0) {
+        if (cn->n_args != 3) {
+            codegen_error_sistema_incorporada_arity(
+                cg, cn, 3,
+                "ruta_texto, pesos, sesgos",
+                "nativo_mlp_guardar(ruta, pesos, sesgos)", NULL);
+            return 1;
+        }
+        const int B0 = 40;
+        visit_expression(cg, ARG0, B0);
+        visit_expression(cg, ARG1, B0 + 1);
+        visit_expression(cg, ARG2, B0 + 2);
+        emit(cg, OP_ANALITICA_MLP_SAVE, (uint8_t)dest_reg, (uint8_t)B0, 0,
              IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
         return 1;
     }
@@ -4869,21 +4920,29 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
     if (strcmp(name, "fs_borrar") == 0) {
         if (!ARG0) return 0;
         visit_expression(cg, ARG0, 1);
-        emit(cg, OP_FS_BORRAR, dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
+        /* VM: path y resultado en operand_a (registro 1), no en dest_reg */
+        emit(cg, OP_FS_BORRAR, 1, 0, 0, 0);
+        if (dest_reg != 1)
+            emit(cg, OP_MOVER, (uint8_t)dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
         return 1;
     }
     if (strcmp(name, "fs_copiar") == 0) {
         if (cn->n_args < 2) return 0;
         visit_expression(cg, ARG0, 1);
         visit_expression(cg, ARG1, 2);
-        emit(cg, OP_FS_COPIAR, dest_reg, 1, 2, IR_INST_FLAG_B_REGISTER);
+        /* VM: src en operand_a (1), dst en operand_b (2); resultado pisa reg 1 */
+        emit(cg, OP_FS_COPIAR, 1, 2, 0, IR_INST_FLAG_B_REGISTER);
+        if (dest_reg != 1)
+            emit(cg, OP_MOVER, (uint8_t)dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
         return 1;
     }
     if (strcmp(name, "fs_mover") == 0) {
         if (cn->n_args < 2) return 0;
         visit_expression(cg, ARG0, 1);
         visit_expression(cg, ARG1, 2);
-        emit(cg, OP_FS_MOVER, dest_reg, 1, 2, IR_INST_FLAG_B_REGISTER);
+        emit(cg, OP_FS_MOVER, 1, 2, 0, IR_INST_FLAG_B_REGISTER);
+        if (dest_reg != 1)
+            emit(cg, OP_MOVER, (uint8_t)dest_reg, 1, 0, IR_INST_FLAG_B_REGISTER);
         return 1;
     }
     if (strcmp(name, "fs_tamano") == 0) {
@@ -5019,6 +5078,9 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
             } else if (ln->is_float) {
                 visit_expression(cg, expr, dest_reg + 1);
                 emit(cg, OP_IMPRIMIR_FLOTANTE, (uint8_t)(dest_reg + 1), 0, 0, IR_INST_FLAG_A_REGISTER);
+            } else if (ln->type_name && tipo_imprimir_es_bool(ln->type_name)) {
+                visit_expression(cg, expr, dest_reg + 1);
+                emit(cg, OP_IMPRIMIR_BOOLEANO, (uint8_t)(dest_reg + 1), 0, 0, IR_INST_FLAG_A_REGISTER);
             } else {
                 visit_expression(cg, expr, dest_reg + 1);
                 emit(cg, OP_IMPRIMIR_NUMERO, (uint8_t)(dest_reg + 1), 0, 0, IR_INST_FLAG_A_REGISTER);
@@ -5044,6 +5106,8 @@ static int visit_call_sistema(CodeGen *cg, CallNode *cn, int dest_reg) {
                 emit(cg, OP_IMPRIMIR_TEXTO, (uint8_t)reg, 0, 0, IR_INST_FLAG_A_REGISTER);
             } else if (t && strcmp(t, "flotante") == 0)
                 emit(cg, OP_IMPRIMIR_FLOTANTE, (uint8_t)reg, 0, 0, IR_INST_FLAG_A_REGISTER);
+            else if (tipo_imprimir_es_bool(t))
+                emit(cg, OP_IMPRIMIR_BOOLEANO, (uint8_t)reg, 0, 0, IR_INST_FLAG_A_REGISTER);
             else
                 emit(cg, OP_IMPRIMIR_NUMERO, (uint8_t)reg, 0, 0, IR_INST_FLAG_A_REGISTER);
         }
@@ -5391,6 +5455,8 @@ static void emit_print_interpolated(CodeGen *cg, const char *text, int add_newli
                     emit(cg, OP_IMPRIMIR_TEXTO, reg, 0, 0, IR_INST_FLAG_A_REGISTER);
                 else if (t && strcmp(t, "flotante") == 0)
                     emit(cg, OP_IMPRIMIR_FLOTANTE, reg, 0, 0, IR_INST_FLAG_A_REGISTER);
+                else if (tipo_imprimir_es_bool(t))
+                    emit(cg, OP_IMPRIMIR_BOOLEANO, reg, 0, 0, IR_INST_FLAG_A_REGISTER);
                 else
                     emit(cg, OP_IMPRIMIR_NUMERO, reg, 0, 0, IR_INST_FLAG_A_REGISTER);
             }
@@ -5437,6 +5503,11 @@ static int emit_print_plus_is_string_concat(CodeGen *cg, ASTNode *expr) {
     return lt_c || rt_c;
 }
 
+/* imprimir: bool del lenguaje (`bool`) y tipo inferido `booleano` */
+static int tipo_imprimir_es_bool(const char *t) {
+    return t && (strcmp(t, "booleano") == 0 || strcmp(t, "bool") == 0);
+}
+
 /* --- 4.1 PrintNode --- */
 static void emit_print(CodeGen *cg, ASTNode *expr, int stmt_line, int stmt_col) {
     /* IMPORTANTE: Usar un registro seguro (120) para evaluar la expresión de 'imprimir'.
@@ -5458,6 +5529,9 @@ static void emit_print(CodeGen *cg, ASTNode *expr, int stmt_line, int stmt_col) 
             int reg = visit_expression(cg, expr, print_reg);
             emit(cg, OP_STR_DESDE_CODIGO, reg, reg, 0, IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER);
             emit(cg, OP_IMPRIMIR_TEXTO, reg, 0, 0, IR_INST_FLAG_A_REGISTER);
+        } else if (ln->type_name && tipo_imprimir_es_bool(ln->type_name)) {
+            int reg = visit_expression(cg, expr, print_reg);
+            emit(cg, OP_IMPRIMIR_BOOLEANO, reg, 0, 0, IR_INST_FLAG_A_REGISTER);
         } else if (ln->is_float) {
             int reg = visit_expression(cg, expr, print_reg);
             emit(cg, OP_IMPRIMIR_FLOTANTE, reg, 0, 0, IR_INST_FLAG_A_REGISTER);
@@ -5490,6 +5564,8 @@ static void emit_print(CodeGen *cg, ASTNode *expr, int stmt_line, int stmt_col) 
                 emit(cg, OP_IMPRIMIR_TEXTO, reg, 0, 0, IR_INST_FLAG_A_REGISTER);
             } else if (t && strcmp(t, "flotante") == 0)
                 emit(cg, OP_IMPRIMIR_FLOTANTE, reg, 0, 0, IR_INST_FLAG_A_REGISTER);
+            else if (tipo_imprimir_es_bool(t))
+                emit(cg, OP_IMPRIMIR_BOOLEANO, reg, 0, 0, IR_INST_FLAG_A_REGISTER);
             else if (t && strcmp(t, "elemento") == 0) {
                 emit(cg, OP_MEM_IMPRIMIR_ID, reg, 0, 0, IR_INST_FLAG_A_REGISTER);
             } else {
@@ -6782,7 +6858,12 @@ static void visit_statement(CodeGen *cg, ASTNode *node) {
         int index_reg = visit_expression(cg, ian->index, 11);
         int val_reg = visit_expression(cg, ian->expression, 12);
 
-        if (target_type && strcmp(target_type, "mapa") == 0)
+        /* m["k"] / mapa[k] -> OP_MEM_MAPA_PONER. m.L[i] se tipaba como mapa y antes usaba MAPA_PONER sobre una lista. */
+        int use_mapa_poner = (target_type && strcmp(target_type, "mapa") == 0);
+        if (use_mapa_poner && is_node(ian->target, NODE_MEMBER_ACCESS))
+            use_mapa_poner = 0;
+
+        if (use_mapa_poner)
             emit(cg, OP_MEM_MAPA_PONER, (uint8_t)target_reg, (uint8_t)index_reg, (uint8_t)val_reg, 
                  IR_INST_FLAG_A_REGISTER | IR_INST_FLAG_B_REGISTER | IR_INST_FLAG_C_REGISTER);
         else

@@ -1,0 +1,16 @@
+principal
+    entero x1 = 3
+    entero x2 = 4
+    imprimir "suma = " + str_desde_numero(x1 + x2)
+    lista xs = crear_lista()
+    lista_agregar(xs, str_desde_numero(1))
+    lista_agregar(xs, str_desde_numero(2))
+    imprimir "len = " + str_desde_numero(lista_tamano(xs))
+    intentar
+        entero z = 10 / 0
+        imprimir str_desde_numero(z)
+    atrapar err
+        imprimir "error = " + err
+        imprimir "atrapado"
+    fin_intentar
+fin_principal

@@ -1,0 +1,15 @@
+/* Paridad VM vs AOT: json_parse, objeto/lista, conversiones, stringify compacto */
+principal
+    texto raw = "{\"a\":1,\"b\":[2,3],\"c\":\"x\"}"
+    entero j = json_parse(raw)
+    imprimir json_tipo(j)
+    entero ja = json_objeto_obtener(j, "a")
+    imprimir json_a_entero(ja)
+    entero jarr = json_objeto_obtener(j, "b")
+    imprimir json_tipo(jarr)
+    imprimir json_lista_tamano(jarr)
+    entero j0 = json_lista_obtener(jarr, 0)
+    imprimir json_a_entero(j0)
+    texto ser = json_stringify(j, 0)
+    imprimir str_desde_numero(longitud_texto(ser))
+fin_principal

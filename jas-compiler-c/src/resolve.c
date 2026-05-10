@@ -2,12 +2,85 @@
 
 #include "resolve.h"
 #include "nodes.h"
+#include "diagnostic.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
-static void resolve_block(ASTNode *node, SymbolTable *st);
-static void resolve_statement(ASTNode *node, SymbolTable *st);
+/* Mismo estilo que do_compile / lexer en main.c */
+#define RES_ANSI_RED   "\x1b[31m"
+#define RES_ANSI_RESET "\x1b[0m"
+
+static void resolve_block(ASTNode *node, SymbolTable *st, int *errs, const char *source, const char *diag_path);
+static void resolve_statement(ASTNode *node, SymbolTable *st, int *errs, const char *source, const char *diag_path);
+
+/** Emite error semantico con fragmento de codigo (igual que diag_attach_snippet en lexer/parser). */
+static void resolve_emit_semantic(const char *source, const char *diag_path, int line, int col, const char *detail) {
+    char head[6144];
+    const char *path = (diag_path && diag_path[0]) ? diag_path : "(sin ruta)";
+    if (line >= 1 && col >= 1)
+        snprintf(head, sizeof head, "Archivo %s, linea %d, columna %d: error semantico: %s", path, line, col, detail);
+    else
+        snprintf(head, sizeof head, "Archivo %s: error semantico: %s", path, detail);
+
+    if (source && line >= 1 && col >= 1) {
+        char *full = diag_attach_snippet(source, line, col, head);
+        fprintf(stderr, "%s%s%s", RES_ANSI_RED, full ? full : head, RES_ANSI_RESET);
+        if (full) free(full);
+    } else
+        fprintf(stderr, "%s%s%s", RES_ANSI_RED, head, RES_ANSI_RESET);
+}
+
+/* lista, lista?, mapa, mapa? */
+static int type_is_foreach_collection(const char *type_name) {
+    if (!type_name) return 0;
+    return strcmp(type_name, "lista") == 0 || strcmp(type_name, "lista?") == 0 ||
+           strcmp(type_name, "mapa") == 0 || strcmp(type_name, "mapa?") == 0;
+}
+
+static void validate_foreach_types(ForEachNode *fe, SymbolTable *st, int *errs,
+                                   const char *source, const char *diag_path) {
+    if (!fe || !errs) return;
+    if (!fe->collection || fe->collection->type != NODE_IDENTIFIER) return;
+    if (!fe->iter_type || !fe->iter_name) return;
+
+    IdentifierNode *coll_id = (IdentifierNode *)fe->collection;
+    const char *coll_name = coll_id->name;
+    const char *ct = sym_lookup_type(st, coll_name);
+    int line = fe->base.line > 0 ? fe->base.line : coll_id->base.line;
+    int col = fe->base.col > 0 ? fe->base.col : coll_id->base.col;
+
+    if (!ct)
+        return;
+
+    if (!type_is_foreach_collection(ct)) {
+        char detail[1536];
+        snprintf(detail, sizeof detail,
+                 "en 'para cada' solo se puede iterar sobre lista o mapa.\n"
+                 "  La variable \"%s\" tiene tipo \"%s\".\n"
+                 "  Ayuda: use una coleccion (por ejemplo lista<entero> datos o mapa<texto> tabla).",
+                 coll_name, ct);
+        resolve_emit_semantic(source, diag_path, line, col, detail);
+        (*errs)++;
+        return;
+    }
+
+    const char *elem_t = sym_lookup_collection_elem_type(st, coll_name);
+    if (!elem_t)
+        return;
+    if (strcmp(fe->iter_type, "elemento") == 0)
+        return;
+    if (strcmp(fe->iter_type, elem_t) != 0) {
+        char detail[1536];
+        snprintf(detail, sizeof detail,
+                 "el tipo del iterador no coincide con los elementos de la coleccion.\n"
+                 "  Coleccion \"%s\": cada elemento es de tipo \"%s\". Iterador declarado: %s %s.\n"
+                 "  Ayuda: use \"%s %s\" o \"elemento %s\". En mapa<T> cada paso entrega un valor de tipo T (no la clave).",
+                 coll_name, elem_t, fe->iter_type, fe->iter_name, elem_t, fe->iter_name, fe->iter_name);
+        resolve_emit_semantic(source, diag_path, line, col, detail);
+        (*errs)++;
+    }
+}
 
 static size_t type_size(SymbolTable *st, const char *type_name) {
     if (!type_name) return 8;
@@ -28,7 +101,8 @@ static size_t type_size(SymbolTable *st, const char *type_name) {
     return 8;
 }
 
-static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs, int report_errors) {
+static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs, int report_errors,
+                                     const char *source, const char *diag_path) {
     if (!node || node->type != NODE_STRUCT_DEF) return;
     StructDefNode *sd = (StructDefNode *)node;
 
@@ -45,12 +119,20 @@ static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs,
             masts, mnames, sd->method_visibilities, sd->n_methods, sd->is_exported, sd->is_clase);
         if (er != 0) {
             if (report_errors) {
+                int sl = sd->base.line > 0 ? sd->base.line : 1;
+                int sc = sd->base.col > 0 ? sd->base.col : 1;
                 if (er == -1) {
-                    fprintf(stderr, "Error semantico: la clase/registro '%s' extiende una base no registrada.\n",
-                            sd->name ? sd->name : "?");
+                    char detail[384];
+                    snprintf(detail, sizeof detail,
+                             "la clase o registro \"%s\" extiende una base que no esta registrada.",
+                             sd->name ? sd->name : "?");
+                    resolve_emit_semantic(source, diag_path, sl, sc, detail);
                 } else if (er == -2) {
-                    fprintf(stderr, "Error semantico: la clase '%s' redefine un campo de una de sus bases.\n",
-                            sd->name ? sd->name : "?");
+                    char detail[384];
+                    snprintf(detail, sizeof detail,
+                             "la clase \"%s\" redefine un campo que ya existe en una clase base.",
+                             sd->name ? sd->name : "?");
+                    resolve_emit_semantic(source, diag_path, sl, sc, detail);
                 }
             }
             (*errs)++;
@@ -64,11 +146,12 @@ static void register_struct_recursive(SymbolTable *st, ASTNode *node, int *errs,
     if (masts) free(masts);
 
     for (size_t i = 0; i < sd->n_nested_structs; i++) {
-        register_struct_recursive(st, sd->nested_structs[i], errs, report_errors);
+        register_struct_recursive(st, sd->nested_structs[i], errs, report_errors, source, diag_path);
     }
 }
 
-static void resolve_struct_methods_recursive(SymbolTable *st, ASTNode *node) {
+static void resolve_struct_methods_recursive(SymbolTable *st, ASTNode *node, int *errs,
+                                            const char *source, const char *diag_path) {
     if (!node || node->type != NODE_STRUCT_DEF) return;
     StructDefNode *sd = (StructDefNode *)node;
     
@@ -86,16 +169,16 @@ static void resolve_struct_methods_recursive(SymbolTable *st, ASTNode *node) {
             if (vd)
                 sym_declare(st, vd->name, vd->type_name, 8, 1, 0, vd->list_element_type, SYMDECL_FLAGS_NONE);
         }
-        resolve_block(fn->body, st);
+        resolve_block(fn->body, st, errs, source, diag_path);
         sym_exit_scope(st);
     }
 
     for (size_t i = 0; i < sd->n_nested_structs; i++) {
-        resolve_struct_methods_recursive(st, sd->nested_structs[i]);
+        resolve_struct_methods_recursive(st, sd->nested_structs[i], errs, source, diag_path);
     }
 }
 
-int resolve_program(ASTNode *ast, SymbolTable *st) {
+int resolve_program(ASTNode *ast, SymbolTable *st, const char *source, const char *diag_path) {
     int resolve_errs = 0;
     if (!ast || ast->type != NODE_PROGRAM) return 0;
     ProgramNode *p = (ProgramNode *)ast;
@@ -134,10 +217,10 @@ int resolve_program(ASTNode *ast, SymbolTable *st) {
             ASTNode *g = p->globals[i];
             if (g && g->type == NODE_STRUCT_DEF) {
                 StructDefNode *sd = (StructDefNode*)g;
-                if (sym_get_struct_info(st, sd->name)) continue; // Ya registrado
+                if (sym_get_struct_info(st, sd->name)) continue; /* Ya registrado */
                 
                 int local_errs = 0;
-                register_struct_recursive(st, g, &local_errs, 0);
+                register_struct_recursive(st, g, &local_errs, 0, source, diag_path);
                 if (local_errs == 0) {
                     changed = 1;
                 } else {
@@ -152,7 +235,7 @@ int resolve_program(ASTNode *ast, SymbolTable *st) {
             if (p->globals[i] && p->globals[i]->type == NODE_STRUCT_DEF) {
                 StructDefNode *sd = (StructDefNode*)p->globals[i];
                 if (!sym_get_struct_info(st, sd->name)) {
-                    register_struct_recursive(st, p->globals[i], &resolve_errs, 1);
+                    register_struct_recursive(st, p->globals[i], &resolve_errs, 1, source, diag_path);
                 }
             }
         }
@@ -170,9 +253,9 @@ int resolve_program(ASTNode *ast, SymbolTable *st) {
 
     /* Principal: enter_scope (función), resolver bloque */
     sym_enter_scope(st, 1);
-    resolve_block(p->main_block, st);
+    resolve_block(p->main_block, st, &resolve_errs, source, diag_path);
     int main_unused = sym_exit_scope(st);
-    if (main_unused > 0) {} // we ignore count for now if just want warnings or let the return count act
+    if (main_unused > 0) {} /* reservado */
     
     /* Funciones */
     for (size_t i = 0; i < p->n_funcs; i++) {
@@ -184,26 +267,26 @@ int resolve_program(ASTNode *ast, SymbolTable *st) {
             if (vd)
                 sym_declare(st, vd->name, vd->type_name, 8, 1, 0, vd->list_element_type, SYMDECL_FLAGS_NONE);
         }
-        resolve_block(fn->body, st);
+        resolve_block(fn->body, st, &resolve_errs, source, diag_path);
         int func_unused = sym_exit_scope(st);
         if (func_unused > 0) {}
     }
 
     /* Metodos de clases */
     for (size_t i = 0; i < p->n_globals; i++) {
-        resolve_struct_methods_recursive(st, p->globals[i]);
+        resolve_struct_methods_recursive(st, p->globals[i], &resolve_errs, source, diag_path);
     }
     return resolve_errs;
 }
 
-static void resolve_block(ASTNode *node, SymbolTable *st) {
+static void resolve_block(ASTNode *node, SymbolTable *st, int *errs, const char *source, const char *diag_path) {
     if (!node || node->type != NODE_BLOCK) return;
     BlockNode *b = (BlockNode *)node;
     for (size_t i = 0; i < b->n; i++)
-        resolve_statement(b->statements[i], st);
+        resolve_statement(b->statements[i], st, errs, source, diag_path);
 }
 
-static void resolve_statement(ASTNode *node, SymbolTable *st) {
+static void resolve_statement(ASTNode *node, SymbolTable *st, int *errs, const char *source, const char *diag_path) {
     if (!node) return;
     switch (node->type) {
         case NODE_INPUT: {
@@ -224,41 +307,43 @@ static void resolve_statement(ASTNode *node, SymbolTable *st) {
         }
         case NODE_FOREACH: {
             ForEachNode *fe = (ForEachNode *)node;
+            if (errs)
+                validate_foreach_types(fe, st, errs, source, diag_path);
             sym_enter_scope(st, 0);
             if (fe->iter_name && fe->iter_type)
                 sym_declare(st, fe->iter_name, fe->iter_type, 8, 0, 0, NULL, SYMDECL_FLAGS_NONE);
-            resolve_block(fe->body, st);
+            resolve_block(fe->body, st, errs, source, diag_path);
             sym_exit_scope(st);
             break;
         }
         case NODE_WHILE: {
             WhileNode *wn = (WhileNode *)node;
-            resolve_block(wn->body, st);
+            resolve_block(wn->body, st, errs, source, diag_path);
             break;
         }
         case NODE_DO_WHILE: {
             DoWhileNode *dn = (DoWhileNode *)node;
-            resolve_block(dn->body, st);
+            resolve_block(dn->body, st, errs, source, diag_path);
             break;
         }
         case NODE_IF: {
             IfNode *in = (IfNode *)node;
-            resolve_block(in->body, st);
-            if (in->else_body) resolve_block(in->else_body, st);
+            resolve_block(in->body, st, errs, source, diag_path);
+            if (in->else_body) resolve_block(in->else_body, st, errs, source, diag_path);
             break;
         }
         case NODE_SELECT: {
             SelectNode *sn = (SelectNode *)node;
             for (size_t i = 0; i < sn->n_cases; i++)
-                resolve_block(sn->cases[i].body, st);
-            if (sn->default_body) resolve_block(sn->default_body, st);
+                resolve_block(sn->cases[i].body, st, errs, source, diag_path);
+            if (sn->default_body) resolve_block(sn->default_body, st, errs, source, diag_path);
             break;
         }
         case NODE_TRY: {
             TryNode *tn = (TryNode *)node;
-            resolve_block(tn->try_body, st);
-            if (tn->catch_body) resolve_block(tn->catch_body, st);
-            if (tn->final_body) resolve_block(tn->final_body, st);
+            resolve_block(tn->try_body, st, errs, source, diag_path);
+            if (tn->catch_body) resolve_block(tn->catch_body, st, errs, source, diag_path);
+            if (tn->final_body) resolve_block(tn->final_body, st, errs, source, diag_path);
             break;
         }
         case NODE_EXPORT_DIRECTIVE: {

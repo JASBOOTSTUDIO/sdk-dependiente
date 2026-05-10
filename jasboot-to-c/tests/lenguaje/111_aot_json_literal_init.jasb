@@ -1,0 +1,5 @@
+/* Paridad VM vs AOT: json_stringify con nulo (mismo comportamiento que literal objeto no soportado en VM). */
+principal
+    imprimir json_stringify(nulo, 0)
+    imprimir json_stringify(nulo, 0)
+fin_principal

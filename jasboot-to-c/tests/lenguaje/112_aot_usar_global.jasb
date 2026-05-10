@@ -1,0 +1,6 @@
+/* Importa variable global exportada desde otro .jasb (fusion usar en jbc y en jbc-to-c). */
+usar { MOD_EXPORT_K } de "112_mod_export_const.jasb"
+
+principal
+    imprimir texto_desde_numero(MOD_EXPORT_K)
+fin_principal

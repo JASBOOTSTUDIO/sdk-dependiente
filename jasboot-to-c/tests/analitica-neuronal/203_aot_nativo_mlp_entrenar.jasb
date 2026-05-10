@@ -1,0 +1,36 @@
+# Paridad VM/AOT: nativo_mlp_entrenar (1 entrada, 1 oculta, 1 salida; 1 muestra).
+principal
+    lista capas_oc = crear_lista()
+    lista_agregar(capas_oc, 1)
+
+    lista X = crear_lista()
+    lista fila_x = crear_lista()
+    lista_agregar(fila_x, 1.0)
+    lista_agregar(X, fila_x)
+
+    lista yy = crear_lista()
+    lista_agregar(yy, 0.5)
+
+    lista pesos = crear_lista()
+    lista L0 = crear_lista()
+    lista r0 = crear_lista()
+    lista_agregar(r0, 0.1)
+    lista_agregar(L0, r0)
+    lista L1 = crear_lista()
+    lista r1 = crear_lista()
+    lista_agregar(r1, 0.1)
+    lista_agregar(L1, r1)
+    lista_agregar(pesos, L0)
+    lista_agregar(pesos, L1)
+
+    lista sesgos = crear_lista()
+    lista S0 = crear_lista()
+    lista_agregar(S0, 0.0)
+    lista S1 = crear_lista()
+    lista_agregar(S1, 0.0)
+    lista_agregar(sesgos, S0)
+    lista_agregar(sesgos, S1)
+
+    flotante mse = nativo_mlp_entrenar(pesos, sesgos, X, yy, capas_oc, 0.3, 50)
+    imprimir decimal(mse, 6)
+fin_principal

@@ -1,0 +1,2 @@
+/* Modulo minimo: constante global exportada (paridad VM / AOT con usar). */
+enviar entero MOD_EXPORT_K = 42

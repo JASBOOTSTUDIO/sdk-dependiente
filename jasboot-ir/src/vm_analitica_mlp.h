@@ -16,4 +16,9 @@
  * Devuelve MSE del ultimo epoch (float). Escribe pesos/sesgos en JMN/listas. */
 float vm_analitica_mlp_fit_native(VM* vm, uint8_t base_reg);
 
+/* Inferencia MLP 1 capa oculta.
+ * base..base+2: pesos, sesgos, x (vector entrada). */
+float vm_analitica_mlp_predict_native(VM* vm, uint8_t base_reg);
+int vm_analitica_mlp_save_native(VM* vm, uint8_t base_reg);
+
 #endif

@@ -1,0 +1,11 @@
+/* Paridad VM vs AOT: operadores << >> y alias segmentar_palabras / palabras_de. */
+principal
+    entero x = 2
+    entero n = 3
+    imprimir texto_desde_numero(x << n)
+    imprimir texto_desde_numero(64 >> 3)
+    lista pal = segmentar_palabras("uno dos tres", " ")
+    imprimir texto_desde_numero(lista_tamano(pal))
+    lista q = palabras_de("a:b", ":")
+    imprimir texto_desde_numero(lista_tamano(q))
+fin_principal

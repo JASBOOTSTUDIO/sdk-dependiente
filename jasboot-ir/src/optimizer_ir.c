@@ -2,6 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef OP_NOP
+#define OP_NOP 0xFF
+#endif
+
 typedef struct {
     uint8_t known[IR_REGISTER_COUNT];
     uint64_t value[IR_REGISTER_COUNT];

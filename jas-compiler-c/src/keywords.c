@@ -40,7 +40,7 @@ const char *const KEYWORDS[] = {
     "seleccionar", "caso", "defecto", "fin_seleccionar",
     "intentar", "atrapar", "final", "fin_intentar", "lanzar", "macro", "llamar",
     "fs_abrir", "fs_cerrar", "fs_escribir", "fs_leer_linea",
-    "fs_leer_byte", "fs_escribir_byte", "sys_argc", "sys_argv", "str_extraer_caracter", "str_desde_numero", "decimal", "codigo_caracter", "caracter_a_texto",
+    "fs_leer_byte", "fs_escribir_byte", "sys_argc", "sys_argv", "str_extraer_caracter", "str_desde_numero", "texto_desde_numero", "decimal", "codigo_caracter", "caracter_a_texto",
     "byte_a_caracter", "caracter_a_byte",
     "mem_lista_crear", "mem_lista_agregar", "mem_lista_obtener", "mem_lista_tamano", "mem_lista_limpiar",
     "mem_lista_liberar", "lista_liberar",

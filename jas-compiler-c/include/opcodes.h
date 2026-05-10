@@ -24,6 +24,8 @@
 #define IR_INST_FLAG_C_REGISTER  0x00
 
 #define OP_HALT           0x00
+#define OP_MEM_PENALIZAR  0x0E /* VM legacy: penalizar asociación (no confundir con MAPA_BORRAR 0xE3) */
+#define OP_IMPRIMIR_BOOLEANO 0x0F /* A reg: imprime verdadero/falso (español), distinto de entero 0/1 */
 #define OP_MOVER          0x01
 #define OP_LEER           0x02
 #define OP_ESCRIBIR       0x03
@@ -32,6 +34,9 @@
 #define OP_GET_FP         0x06   /* A <- FP (frame pointer) */
 #define OP_DEBUG_LINE     0x07   /* VM guarda la linea actual en su estado (B|C) */
 #define OP_ANALITICA_MLP_FIT 0x08 /* MLP 1 oculta ReLU + salida sigmoid; ver ir_format.h */
+#define OP_ANALITICA_MLP_PREDICT 0x9F /* Inferencia MLP simple */
+#define OP_ANALITICA_MLP_SAVE 0x9E /* Guardar MLP a binario JBM1 */
+#define OP_MEM_MAPA_CONTIENE 0x0D /* A <- 1 si clave C existe en mapa B, else 0 */
 
 #define OP_SUMAR          0x10
 #define OP_RESTAR         0x11

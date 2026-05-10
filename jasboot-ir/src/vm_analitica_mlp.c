@@ -383,3 +383,142 @@ fail_buf:
     free(d2);
     return 1.0f;
 }
+
+float vm_analitica_mlp_predict_native(VM* vm, uint8_t base_reg) {
+    if (!vm) return 0.0f;
+    uint64_t* R = vm->registers;
+    uint32_t pesos_id = reg_u32(R[base_reg + 0]);
+    uint32_t sesgos_id = reg_u32(R[base_reg + 1]);
+    uint32_t x_id = reg_u32(R[base_reg + 2]);
+
+    JMNMemoria* mp = mlp_pick_mem(vm, pesos_id);
+    JMNMemoria* ms = mlp_pick_mem(vm, sesgos_id);
+    JMNMemoria* mx = mlp_pick_mem(vm, x_id);
+    if (!mp || !ms || !mx) return 0.0f;
+
+    uint32_t L0 = jmn_lista_obtener(mp, pesos_id, 0).u;
+    uint32_t L1 = jmn_lista_obtener(mp, pesos_id, 1).u;
+    uint32_t S0 = jmn_lista_obtener(ms, sesgos_id, 0).u;
+    uint32_t S1 = jmn_lista_obtener(ms, sesgos_id, 1).u;
+
+    JMNMemoria* mL0 = mlp_pick_mem(vm, L0);
+    JMNMemoria* mL1 = mlp_pick_mem(vm, L1);
+    JMNMemoria* mS0 = mlp_pick_mem(vm, S0);
+    JMNMemoria* mS1 = mlp_pick_mem(vm, S1);
+
+    int n_in = (int)jmn_lista_tamano(mL0, L0);
+    int H = (int)jmn_lista_tamano(mS0, S0);
+    int n_out = (int)jmn_lista_tamano(mS1, S1);
+
+    // Forward pass
+    double* z1 = (double*)malloc(sizeof(double) * H);
+    double* a1 = (double*)malloc(sizeof(double) * H);
+    
+    for (int j = 0; j < H; j++) {
+        double sum = (double)jmn_lista_obtener(mS0, S0, (uint32_t)j).f;
+        for (int i = 0; i < n_in; i++) {
+            uint32_t row_id = jmn_lista_obtener(mL0, L0, (uint32_t)i).u;
+            JMNMemoria* mr = mlp_pick_mem(vm, row_id);
+            double w = (double)jmn_lista_obtener(mr, row_id, (uint32_t)j).f;
+            double x = (double)jmn_lista_obtener(mx, x_id, (uint32_t)i).f;
+            sum += w * x;
+        }
+        z1[j] = sum;
+        a1[j] = sum > 0.0 ? sum : 0.0;
+    }
+
+    double res = 0.0;
+    if (n_out == 1) {
+        double sum2 = (double)jmn_lista_obtener(mS1, S1, 0).f;
+        for (int j = 0; j < H; j++) {
+            uint32_t row_id = jmn_lista_obtener(mL1, L1, (uint32_t)j).u;
+            JMNMemoria* mr = mlp_pick_mem(vm, row_id);
+            double w = (double)jmn_lista_obtener(mr, row_id, 0).f;
+            sum2 += w * a1[j];
+        }
+        res = sigmoid(sum2);
+    } else {
+        // Softmax not implemented for simple predict yet, return first logit
+        res = 0.0; 
+    }
+
+    free(z1);
+    free(a1);
+    return (float)res;
+}
+
+int vm_analitica_mlp_save_native(VM* vm, uint8_t base_reg) {
+    if (!vm) return 0;
+    uint64_t* R = vm->registers;
+    uint32_t ruta_id = reg_u32(R[base_reg + 0]);
+    uint32_t pesos_id = reg_u32(R[base_reg + 1]);
+    uint32_t sesgos_id = reg_u32(R[base_reg + 2]);
+
+    char ruta[512];
+    if (jmn_obtener_texto(vm->mem_neuronal, ruta_id, ruta, sizeof(ruta)) <= 0) return 0;
+
+    FILE* f = fopen(ruta, "wb");
+    if (!f) return 0;
+
+    fwrite("JBM1", 4, 1, f);
+    uint8_t ver = 1;
+    fwrite(&ver, 1, 1, f);
+
+    JMNMemoria* mp = mlp_pick_mem(vm, pesos_id);
+    JMNMemoria* ms = mlp_pick_mem(vm, sesgos_id);
+    if (!mp || !ms) { fclose(f); return 0; }
+
+    uint32_t L0_id = jmn_lista_obtener(mp, pesos_id, 0).u;
+    uint32_t L1_id = jmn_lista_obtener(mp, pesos_id, 1).u;
+    uint32_t S0_id = jmn_lista_obtener(ms, sesgos_id, 0).u;
+    uint32_t S1_id = jmn_lista_obtener(ms, sesgos_id, 1).u;
+
+    JMNMemoria* mL0 = mlp_pick_mem(vm, L0_id);
+    JMNMemoria* mL1 = mlp_pick_mem(vm, L1_id);
+    JMNMemoria* mS0 = mlp_pick_mem(vm, S0_id);
+    JMNMemoria* mS1 = mlp_pick_mem(vm, S1_id);
+
+    // Metadata basica
+    uint32_t n_in = jmn_lista_tamano(mL0, L0_id);
+    uint32_t H = jmn_lista_tamano(mS0, S0_id);
+    uint32_t n_out = jmn_lista_tamano(mS1, S1_id);
+
+    fwrite(&n_in, 4, 1, f);
+    fwrite(&H, 4, 1, f);
+    fwrite(&n_out, 4, 1, f);
+
+    // Pesos Capa 0 (n_in x H)
+    for (uint32_t i = 0; i < n_in; i++) {
+        uint32_t row_id = jmn_lista_obtener(mL0, L0_id, i).u;
+        JMNMemoria* mr = mlp_pick_mem(vm, row_id);
+        for (uint32_t j = 0; j < H; j++) {
+            float w = jmn_lista_obtener(mr, row_id, j).f;
+            fwrite(&w, 4, 1, f);
+        }
+    }
+
+    // Pesos Capa 1 (H x n_out)
+    for (uint32_t j = 0; j < H; j++) {
+        uint32_t row_id = jmn_lista_obtener(mL1, L1_id, j).u;
+        JMNMemoria* mr = mlp_pick_mem(vm, row_id);
+        for (uint32_t k = 0; k < n_out; k++) {
+            float w = jmn_lista_obtener(mr, row_id, k).f;
+            fwrite(&w, 4, 1, f);
+        }
+    }
+
+    // Sesgos S0 (H)
+    for (uint32_t j = 0; j < H; j++) {
+        float b = jmn_lista_obtener(mS0, S0_id, j).f;
+        fwrite(&b, 4, 1, f);
+    }
+
+    // Sesgos S1 (n_out)
+    for (uint32_t k = 0; k < n_out; k++) {
+        float b = jmn_lista_obtener(mS1, S1_id, k).f;
+        fwrite(&b, 4, 1, f);
+    }
+
+    fclose(f);
+    return 1;
+}

@@ -1,0 +1,23 @@
+/* Paridad VM vs AOT: fs_abrir wb/rb, fs_escribir_byte, fs_leer_byte.
+   run-jasb / F5: cwd = carpeta del .jasb → tmp_108_fs.bin queda junto al fuente.
+   verify_vm_aot.cjs: cwd = raíz del repo → el mismo nombre crea tmp_108_fs.bin allí. */
+principal
+    texto ruta = "tmp_108_fs.bin"
+    entero h = fs_abrir(ruta, "wb")
+    fs_escribir_byte(74, h)
+    fs_escribir_byte(66, h)
+    fs_escribir_byte(77, h)
+    fs_escribir_byte(255, h)
+    fs_cerrar(h)
+
+    imprimir existe_archivo(ruta)
+
+    h = fs_abrir(ruta, "rb")
+    imprimir fs_leer_byte(h)
+    
+    imprimir fs_leer_byte(h)
+    entero tercero = fs_leer_byte(h)
+    imprimir fs_leer_byte(h)
+    imprimir str_desde_numero(tercero)
+    fs_cerrar(h)
+fin_principal

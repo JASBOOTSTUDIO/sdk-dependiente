@@ -1,0 +1,66 @@
+/*
+ * Demo pesado e interactivo: 3 modulos (UI, JSON, binario) + menu.
+ * Ejecutar desde esta carpeta (o con run-jasb / verify_vm_aot con cwd raiz del repo).
+ * Entrada automatica: pl_main.stdin (misma base que este archivo).
+ * Nota: `llamar` requiere parentesis alrededor de la llamada: llamar (f(...)).
+ */
+usar { pl_ui_banner, pl_ui_subtitulo, pl_ui_opciones } de "pl_m_ui.jasb"
+usar { pl_json_texto_inicial, pl_json_tipar_raiz, pl_json_conteo_items } de "pl_m_json.jasb"
+usar { pl_bin_ruta_temp, pl_bin_escribir_marcador, pl_bin_verificar_marcador, pl_bin_estres_escritura } de "pl_m_bin.jasb"
+
+principal
+    entero salir = 0
+    imprimir llamar (pl_ui_banner(0))
+    imprimir llamar (pl_ui_subtitulo(0))
+    imprimir llamar (pl_ui_opciones(0))
+
+    mientras salir == 0 hacer
+        imprimir_sin_salto "> "
+        texto linea
+        ingresar_texto linea
+        entero op = str_a_entero(linea)
+
+        seleccionar op hacer
+            caso 1
+                imprimir "--- Ayuda ---"
+                imprimir llamar (pl_ui_banner(0))
+                imprimir llamar (pl_ui_opciones(0))
+            caso 2
+                imprimir "--- JSON demo ---"
+                texto seed = llamar (pl_json_texto_inicial(0))
+                imprimir seed
+                imprimir "Tipo raiz JSON (codigo interno VM/AOT):"
+                imprimir texto_desde_numero(llamar (pl_json_tipar_raiz(seed)))
+                imprimir "Items en arreglo raiz items (0 si no aplica):"
+                imprimir texto_desde_numero(llamar (pl_json_conteo_items(seed)))
+            caso 3
+                imprimir "--- Bin marcador ---"
+                texto ruta = llamar (pl_bin_ruta_temp(0))
+                imprimir texto_desde_numero(llamar (pl_bin_escribir_marcador(ruta)))
+                imprimir texto_desde_numero(llamar (pl_bin_verificar_marcador(ruta)))
+            caso 4
+                imprimir "Escriba N (bytes a escribir en estres, p. ej. 200):"
+                texto tn
+                ingresar_texto tn
+                entero nn = str_a_entero(tn)
+                texto r2 = llamar (pl_bin_ruta_temp(0))
+                imprimir texto_desde_numero(llamar (pl_bin_estres_escritura(r2, nn)))
+                imprimir texto_desde_numero(fs_tamano(r2))
+            caso 5
+                imprimir "Pegue UNA linea JSON valida:"
+                texto jl
+                ingresar_texto jl
+                imprimir "Tipo raiz de su JSON (codigo interno):"
+                imprimir texto_desde_numero(llamar (pl_json_tipar_raiz(jl)))
+            caso 6
+                imprimir "--- Limpieza bin demo ---"
+                texto rz = llamar (pl_bin_ruta_temp(0))
+                imprimir texto_desde_numero(fs_borrar(rz))
+            caso 0
+                imprimir "Fin del laboratorio. Hasta pronto."
+                salir = 1
+            defecto
+                imprimir "Opcion no reconocida. Pruebe 1-6 o 0."
+        fin_seleccionar
+    fin_mientras
+fin_principal

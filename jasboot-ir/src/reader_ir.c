@@ -248,8 +248,11 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != OP_STR_EXTRAER_ANTES && inst.opcode != OP_STR_EXTRAER_DESPUES &&
             inst.opcode != OP_STR_EXTRAER_ANTES_REG && inst.opcode != OP_STR_EXTRAER_DESPUES_REG &&
             inst.opcode != OP_STR_CONCATENAR && inst.opcode != OP_STR_CONCATENAR_REG &&
+            inst.opcode != OP_ANALITICA_MLP_FIT &&
+            inst.opcode != OP_ANALITICA_MLP_PREDICT &&
             inst.opcode != OP_STR_REGISTRAR_LITERAL &&
             inst.opcode != OP_IMPRIMIR_NUMERO &&
+            inst.opcode != OP_IMPRIMIR_BOOLEANO &&
             inst.opcode != OP_MEM_PENSAR &&
             inst.opcode != OP_MEM_ASOCIAR &&
             inst.opcode != OP_MEM_ULTIMA_PALABRA &&
@@ -299,6 +302,7 @@ IRValidationInfo ir_validate_memory(IRFile* ir) {
             inst.opcode != OP_FS_LEER_U32 &&
             inst.opcode != OP_MEM_MAPA_CREAR &&
             inst.opcode != OP_MEM_MAPA_PONER &&
+            inst.opcode != OP_MEM_MAPA_BORRAR &&
             inst.opcode != OP_MEM_MAPA_OBTENER &&
             inst.opcode != OP_MEM_MAPA_TAMANO &&
             inst.opcode != OP_MEM_OBTENER_RELACIONADOS &&

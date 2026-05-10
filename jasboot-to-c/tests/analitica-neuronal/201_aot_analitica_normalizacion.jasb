@@ -1,0 +1,18 @@
+# Paridad VM/AOT — Normalizacion min-max
+usar { Normalizacion } de "../../../../stdlib/analitica-neuronal/preprocesamiento/normalizacion.jasb"
+
+principal
+    Normalizacion n
+    n = Normalizacion()
+    n.inicializar()
+    lista d
+    d = crear_lista()
+    lista_agregar(d, 1.0)
+    lista_agregar(d, 3.0)
+    mapa sc
+    sc = n.min_max_scaler_fit(d)
+    lista t
+    t = n.min_max_scaler_transform(d, sc)
+    imprimir lista_obtener(t, 0)
+    imprimir lista_obtener(t, 1)
+fin_principal

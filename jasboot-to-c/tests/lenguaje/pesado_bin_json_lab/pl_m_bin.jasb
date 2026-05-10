@@ -1,0 +1,39 @@
+/* Modulo 3/3: E/S binaria y estres de escritura secuencial. */
+enviar funcion pl_bin_ruta_temp(entero modo) retorna texto
+    retornar "tmp_pesado_lab_magic.bin"
+fin_funcion
+
+enviar funcion pl_bin_escribir_marcador(texto ruta) retorna entero
+    entero h = fs_abrir(ruta, "wb")
+    fs_escribir_byte(90, h)
+    fs_escribir_byte(66, h)
+    fs_escribir_byte(49, h)
+    fs_cerrar(h)
+    retornar 1
+fin_funcion
+
+enviar funcion pl_bin_verificar_marcador(texto ruta) retorna entero
+    si existe_archivo(ruta) == 0 entonces
+        retornar 0
+    fin_si
+    entero h = fs_abrir(ruta, "rb")
+    entero ba = fs_leer_byte(h)
+    entero bb = fs_leer_byte(h)
+    entero bc = fs_leer_byte(h)
+    fs_cerrar(h)
+    si ba == 90 y bb == 66 y bc == 49 entonces
+        retornar 1
+    fin_si
+    retornar 0
+fin_funcion
+
+enviar funcion pl_bin_estres_escritura(texto ruta, entero n) retorna entero
+    entero h = fs_abrir(ruta, "wb")
+    entero cnt = 0
+    mientras cnt < n hacer
+        fs_escribir_byte(cnt % 256, h)
+        cnt = cnt + 1
+    fin_mientras
+    fs_cerrar(h)
+    retornar n
+fin_funcion
