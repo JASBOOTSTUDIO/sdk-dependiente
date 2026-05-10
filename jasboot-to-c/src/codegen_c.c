@@ -821,6 +821,12 @@ static void gen_call(GenCtx *g, CallNode *c) {
         fputc(')', o);
         return;
     }
+    if ((strcmp(nm, "str_a_flotante") == 0 || strcmp(nm, "convertir_flotante") == 0) && c->n_args >= 1) {
+        fputs("jb_str_a_flotante(", o);
+        gen_expr(g, c->args[0]);
+        fputc(')', o);
+        return;
+    }
     if ((strcmp(nm, "lista_agregar") == 0 || strcmp(nm, "mem_lista_agregar") == 0) && c->n_args >= 2) {
         if (c->args[0] && c->args[0]->type == NODE_MEMBER_ACCESS) {
             emit_list_op_on_map_path(g, c->args[0], "agregar", c->args[1], NULL);
